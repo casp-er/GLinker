@@ -155,7 +155,7 @@ class L3Processor(BaseProcessor[L3Config, L3Input, L3Output]):
 
             # Apply ranking if configured
             if self.schema.get('ranking'):
-                entities = self._rank_entities(entities, text_candidates)
+                entities = self._rank_entities(entities, text_candidates, label_to_candidate)
 
             all_entities.append(entities)
 
@@ -308,28 +308,47 @@ class L3Processor(BaseProcessor[L3Config, L3Input, L3Output]):
         labels, _ = self._create_gliner_labels_with_mapping(candidates)
         return labels
     
-    def _rank_entities(self, entities: List[L3Entity], candidates: List[Any]) -> List[L3Entity]:
-        """Re-rank entities using multiple scoring factors"""
-        # Build label to candidate mapping
-        label_to_candidate = {}
-        for c in candidates:
-            if hasattr(c, 'label'):
-                label_to_candidate[c.label] = c
-                if hasattr(c, 'aliases'):
-                    for alias in c.aliases:
-                        if alias not in label_to_candidate:
-                            label_to_candidate[alias] = c
-        
-        # Calculate weighted scores
+    def _rank_entities(self, entities: List[L3Entity], candidates: List[Any],
+                       label_to_candidate: dict = None) -> List[L3Entity]:
+        """Re-rank entities using weighted combination of scoring factors.
+
+        Normalizes each field by the max value across candidates so that
+        fields with different scales (e.g. gliner_score 0-1 vs popularity
+        0-300) contribute proportionally to the final weighted average.
+        """
+        if label_to_candidate is None:
+            label_to_candidate = {}
+            for c in candidates:
+                if hasattr(c, 'label'):
+                    label_to_candidate[c.label] = c
+                    if hasattr(c, 'aliases'):
+                        for alias in c.aliases:
+                            if alias not in label_to_candidate:
+                                label_to_candidate[alias] = c
+
+        # Precompute per-field max across candidates for normalization
+        field_max = {}
+        for rank_spec in self.schema['ranking']:
+            field = rank_spec['field']
+            if field == 'gliner_score':
+                continue
+            max_val = 0
+            for c in candidates:
+                if hasattr(c, field):
+                    val = getattr(c, field, 0)
+                    if isinstance(val, (int, float)) and val > max_val:
+                        max_val = val
+            field_max[field] = max_val if max_val > 0 else 1
+
         for entity in entities:
             total_score = 0.0
             total_weight = 0.0
-            
+
             for rank_spec in self.schema['ranking']:
                 field = rank_spec['field']
                 weight = rank_spec['weight']
                 total_weight += weight
-                
+
                 if field == 'gliner_score':
                     total_score += entity.score * weight
                 else:
@@ -337,12 +356,11 @@ class L3Processor(BaseProcessor[L3Config, L3Input, L3Output]):
                     if candidate and hasattr(candidate, field):
                         value = getattr(candidate, field, 0)
                         if isinstance(value, (int, float)):
-                            normalized = min(value / 1000000.0, 1.0)
-                            total_score += normalized * weight
-            
+                            total_score += (value / field_max[field]) * weight
+
             if total_weight > 0:
                 entity.score = total_score / total_weight
-        
+
         return sorted(entities, key=lambda x: x.score, reverse=True)
 
 
