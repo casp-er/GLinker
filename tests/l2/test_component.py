@@ -154,6 +154,29 @@ class TestDatabaseChainComponent:
         assert len(results[1]) >= 1  # BRCA1 found
         assert len(results[2]) == 0  # Not found
 
+    def test_search_many_matches_individual_searches(self, l2_component, sample_entities):
+        from glinker.l2.models import DatabaseRecord
+
+        records = [
+            DatabaseRecord(
+                entity_id=e["entity_id"],
+                label=e["label"],
+                description=e["description"],
+                entity_type=e["entity_type"],
+                popularity=e["popularity"],
+                aliases=e["aliases"],
+            )
+            for e in sample_entities
+        ]
+        l2_component.layers[0].load_bulk(records)
+
+        batched = l2_component.search_many(["TP53", "BRCA1", "NONEXISTENT"])
+        individual = [l2_component.search(query) for query in ["TP53", "BRCA1", "NONEXISTENT"]]
+
+        assert [[record.entity_id for record in result] for result in batched] == [
+            [record.entity_id for record in result] for result in individual
+        ]
+
 
 class TestDatabaseChainComponentPrecompute:
     """Tests for precompute_embeddings in DatabaseChainComponent."""

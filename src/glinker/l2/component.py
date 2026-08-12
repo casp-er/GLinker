@@ -38,6 +38,20 @@ class DatabaseLayer(ABC):
     def search(self, query: str) -> List[DatabaseRecord]:
         """Exact search"""
         pass
+
+    def search_many(self, queries: List[str]) -> List[List[DatabaseRecord]]:
+        """Search multiple queries, preserving query order.
+
+        Layers with a native bulk-search API should override this method.
+        The default keeps existing layer implementations correct.
+        """
+        results = []
+        for query in queries:
+            found = self.search(query) if "exact" in self.config.search_mode else []
+            if not found and "fuzzy" in self.config.search_mode and self.supports_fuzzy():
+                found = self.search_fuzzy(query)
+            results.append(found)
+        return results
     
     @abstractmethod
     def search_fuzzy(self, query: str) -> List[DatabaseRecord]:
@@ -462,19 +476,93 @@ class ElasticsearchLayer(DatabaseLayer):
         query = self.normalize_query(query)
 
         try:
-            match_query = {
-                "multi_match": {
-                    "query": query,
-                    "fields": ["label^2", "aliases^1.5", "description"],
-                    "type": "best_fields"
-                }
-            }
-            body = self._build_query(match_query)
-            response = self.client.search(index=self.index_name, body=body)
-            return self._process_hits(response['hits']['hits'])
+            exact = self._search_exact(query)
+            if exact or "fuzzy" not in self.config.search_mode:
+                return exact
+            return self._search_fuzzy(query)
         except Exception as e:
             print(f"[ERROR ES] Search error: {e}")
             return []
+
+    def _match_query(self, query: str, fuzzy: bool = False) -> dict:
+        match = {
+            "multi_match": {
+                "query": query,
+                "fields": ["label^2", "aliases^1.5", "description"],
+            }
+        }
+        if fuzzy:
+            match["multi_match"].update({
+                "fuzziness": self.fuzzy_config.max_distance,
+                "prefix_length": self.fuzzy_config.prefix_length,
+                "max_expansions": 50,
+            })
+        else:
+            match["multi_match"]["type"] = "best_fields"
+        return match
+
+    def _search_exact(self, query: str) -> List[DatabaseRecord]:
+        response = self.client.search(
+            index=self.index_name,
+            body=self._build_query(self._match_query(query)),
+        )
+        return self._process_hits(response["hits"]["hits"])
+
+    def _search_fuzzy(self, query: str) -> List[DatabaseRecord]:
+        response = self.client.search(
+            index=self.index_name,
+            body=self._build_query(self._match_query(query, fuzzy=True)),
+        )
+        return self._process_hits(response["hits"]["hits"])
+
+    def _msearch(self, queries: List[tuple[str, bool]]) -> List[List[DatabaseRecord]]:
+        """Run exact or fuzzy searches in one Elasticsearch request."""
+        if not queries:
+            return []
+
+        searches = []
+        for query, fuzzy in queries:
+            searches.extend([{}, self._build_query(self._match_query(query, fuzzy=fuzzy))])
+
+        response = self.client.msearch(index=self.index_name, searches=searches)
+        return [
+            self._process_hits(result.get("hits", {}).get("hits", []))
+            for result in response["responses"]
+        ]
+
+    def search_many(self, queries: List[str]) -> List[List[DatabaseRecord]]:
+        """Search unique mentions in batched exact-then-fuzzy requests.
+
+        Exact matches are preferred. Fuzzy lookup is only issued for mentions
+        with no exact result, avoiding the previous two sequential requests per
+        mention while preserving fuzzy fallback behavior.
+        """
+        if not queries:
+            return []
+
+        normalized = [self.normalize_query(query) for query in queries]
+        unique = list(dict.fromkeys(normalized))
+        results_by_query = {query: [] for query in unique}
+
+        try:
+            if "exact" in self.config.search_mode:
+                exact_results = self._msearch([(query, False) for query in unique])
+                for query, results in zip(unique, exact_results):
+                    results_by_query[query] = results
+
+            missing = [
+                query for query in unique
+                if not results_by_query[query] and "fuzzy" in self.config.search_mode
+            ]
+            if missing:
+                fuzzy_results = self._msearch([(query, True) for query in missing])
+                for query, results in zip(missing, fuzzy_results):
+                    results_by_query[query] = results
+        except Exception as e:
+            print(f"[ERROR ES] Batched search error: {e}")
+            return [[] for _ in queries]
+
+        return [results_by_query[query] for query in normalized]
 
     def search_fuzzy(self, query: str) -> List[DatabaseRecord]:
         query = self.normalize_query(query)
@@ -979,9 +1067,13 @@ class DatabaseChainComponent(BaseComponent[L2Config]):
             for mode in layer.config.search_mode:
                 if mode == "exact":
                     layer_results.extend(layer.search(mention))
+                    if layer_results:
+                        break
                 elif mode == "fuzzy":
                     if layer.supports_fuzzy():
                         layer_results.extend(layer.search_fuzzy(mention))
+                        if layer_results:
+                            break
             
             if layer_results:
                 layer_results = self.deduplicate_candidates(layer_results)
@@ -992,6 +1084,31 @@ class DatabaseChainComponent(BaseComponent[L2Config]):
         if results and found_in_layer:
             self._cache_write(mention, results, found_in_layer)
         
+        return results
+
+    def search_many(self, mentions: List[str]) -> List[List[DatabaseRecord]]:
+        """Search mentions in layer-priority order using native bulk APIs."""
+        if not mentions:
+            return []
+
+        results = [[] for _ in mentions]
+        pending = list(range(len(mentions)))
+
+        for layer in self.layers:
+            if not pending or not layer.is_available():
+                continue
+
+            layer_results = layer.search_many([mentions[index] for index in pending])
+            next_pending = []
+            for index, candidates in zip(pending, layer_results):
+                candidates = self.deduplicate_candidates(candidates)
+                if candidates:
+                    results[index] = candidates
+                    self._cache_write(mentions[index], candidates, layer)
+                else:
+                    next_pending.append(index)
+            pending = next_pending
+
         return results
     
     def _cache_write(self, query: str, results: List[DatabaseRecord], source_layer: DatabaseLayer):

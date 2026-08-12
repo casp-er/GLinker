@@ -92,31 +92,27 @@ class L2Processor(BaseProcessor[L2Config, L2Input, L2Output]):
         # Check if mentions is nested (list of lists - one per text)
         if mentions and isinstance(mentions[0], (list, tuple)):
             # Nested structure: [[entities_text1], [entities_text2], ...]
+            mention_groups = [
+                [self._extract_mention_text(entity) for entity in text_entities]
+                for text_entities in mentions
+            ]
+            flat_mentions = self._flatten(mention_groups)
+            flat_candidates = self._execute_pipeline_many(flat_mentions)
             all_candidates = []
-            
-            for text_entities in mentions:
-                text_candidates = []
-                
-                for entity in text_entities:
-                    # Extract text from L1Entity or dict
-                    mention_text = self._extract_mention_text(entity)
-                    
-                    # Search candidates for this mention
-                    candidates = self._execute_pipeline(mention_text, self.pipeline)
-                    text_candidates.extend(candidates)
-                
-                all_candidates.append(text_candidates)
+            offset = 0
+            for mention_group in mention_groups:
+                group_candidates = []
+                for _ in mention_group:
+                    group_candidates.extend(flat_candidates[offset])
+                    offset += 1
+                all_candidates.append(group_candidates)
             
             return L2Output(candidates=all_candidates)
         
         # Flat structure: ["mention1", "mention2", ...]
         else:
-            all_candidates = []
-            
-            for mention in mentions:
-                mention_text = self._extract_mention_text(mention)
-                candidates = self._execute_pipeline(mention_text, self.pipeline)
-                all_candidates.append(candidates)
+            mention_texts = [self._extract_mention_text(mention) for mention in mentions]
+            all_candidates = self._execute_pipeline_many(mention_texts)
             
             if structure:
                 grouped = self._group_by_structure(all_candidates, structure)
@@ -125,6 +121,22 @@ class L2Processor(BaseProcessor[L2Config, L2Input, L2Output]):
                 grouped = [self._flatten(all_candidates)]
             
             return L2Output(candidates=grouped)
+
+    def _execute_pipeline_many(self, mentions: List[str]) -> List[List[DatabaseRecord]]:
+        """Execute the search pipeline in one batch when it starts with search."""
+        if not mentions:
+            return []
+
+        if not self.pipeline or self.pipeline[0][0] != "search":
+            return [self._execute_pipeline(mention, self.pipeline) for mention in mentions]
+
+        results = self.component.search_many(mentions)
+        for index, records in enumerate(results):
+            result = records
+            for method_name, kwargs in self.pipeline[1:]:
+                result = self._execute_pipeline_step(result, method_name, kwargs)
+            results[index] = result
+        return results
     
     def _extract_mention_text(self, mention: Any) -> str:
         """Extract text string from mention (can be L1Entity, dict, or str)"""

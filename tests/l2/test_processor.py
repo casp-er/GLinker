@@ -118,6 +118,33 @@ class TestL2ProcessorCall:
         # Result is empty nested list for consistency with input structure
         assert result.candidates == [] or result.candidates == [[]]
 
+    def test_call_uses_one_batched_search(self, l2_config_dict, sample_entities):
+        from unittest.mock import patch
+        from glinker.l2.models import DatabaseRecord
+
+        processor = create_processor("l2_chain", l2_config_dict)
+        records = [
+            DatabaseRecord(
+                entity_id=e["entity_id"],
+                label=e["label"],
+                description=e["description"],
+                entity_type=e["entity_type"],
+                popularity=e["popularity"],
+                aliases=e["aliases"],
+            )
+            for e in sample_entities
+        ]
+        processor.component.layers[0].load_bulk(records)
+
+        with patch.object(
+            processor.component,
+            "search_many",
+            wraps=processor.component.search_many,
+        ) as search_many:
+            processor(mentions=["TP53", "BRCA1"])
+
+        search_many.assert_called_once_with(["TP53", "BRCA1"])
+
 
 class TestL2ProcessorPrecompute:
     """Tests for L2 processor precompute_embeddings."""
