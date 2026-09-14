@@ -144,10 +144,40 @@ def test_postgres_chunked_batch_isolates_a_failing_chunk():
         RuntimeError("simulated statement timeout"),
     ])
 
-    result = layer._batch_retrieve_chunked(["a", "b", "c", "d"], fuzzy=False)
+    results, failed_indices = layer._batch_retrieve_chunked(["a", "b", "c", "d"], fuzzy=False)
 
-    assert result == [[one], [two], [], []]
+    assert results == [[one], [two], [], []]
+    assert failed_indices == {2, 3}
     assert layer._batch_retrieve.call_count == 2
     assert layer._batch_retrieve.call_args_list[0].args == (["a", "b"],)
     assert layer._batch_retrieve.call_args_list[0].kwargs == {"fuzzy": False}
     assert layer._batch_retrieve.call_args_list[1].args == (["c", "d"],)
+
+
+def test_postgres_search_many_skips_fuzzy_retry_for_failed_chunk_mentions():
+    """A mention whose exact-phase chunk raised must not be re-issued as a
+    fuzzy query: that mention's empty result is "unknown" (the chunk never
+    actually ran), not a genuine miss, and retrying it with the strictly
+    more expensive fuzzy path would double the cost against a connection
+    that may have just timed out - the exact regression this fix targets.
+    """
+    with patch.object(PostgresLayer, "_setup", return_value=None):
+        layer = PostgresLayer(
+            LayerConfig(
+                type="postgres",
+                priority=0,
+                search_mode=["exact", "fuzzy"],
+                config={"dsn": "service=test"},
+            )
+        )
+    layer._normalize_many = MagicMock(return_value=["one", "two"])
+
+    one = DatabaseRecord(entity_id="Q1", label="one")
+    # "one" resolves normally; "two" lands in a chunk that failed, so index 1
+    # is reported as failed even though its result slot is also `[]`.
+    layer._batch_retrieve_chunked = MagicMock(return_value=([[one], []], {1}))
+
+    assert layer.search_many(["One", "two"]) == [[one], []]
+
+    # Only the exact phase should run - no fuzzy retry for "two".
+    layer._batch_retrieve_chunked.assert_called_once_with(["one", "two"], fuzzy=False)

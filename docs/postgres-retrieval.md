@@ -120,7 +120,7 @@ cache state were not controlled. PostgreSQL was slower than ES in both runs.
 
 ```sh
 python scripts/prepare_retrieval_corpus.py --input /path/to/wikidata_production.jsonl --mentions tests/l2/retrieval/mentions.json --output /tmp/kb-comparison.jsonl
-python scripts/compare_retrieval.py --pg-dsn 'host=127.0.0.1 port=55439 dbname=glinker_retrieval_test user=postgres password=TEST_PASSWORD' --es-host http://127.0.0.1:59239 --es-settings tests/l2/retrieval/es-settings.json --corpus /tmp/kb-comparison.jsonl --mentions tests/l2/retrieval/mentions.json --output /tmp/retrieval-report.json
+python scripts/compare_retrieval.py --pg-dsn 'host=127.0.0.1 port=55439 dbname=glinker_retrieval_test user=postgres password=TEST_PASSWORD' --es-host http://127.0.0.1:59239 --es-settings tests/l2/retrieval/es-settings.json --corpus /tmp/kb-comparison.jsonl --mentions tests/l2/retrieval/mentions.json --redis-host 127.0.0.1 --redis-port 63790 --redis-ttl 604800 --output /tmp/retrieval-report.json
 ```
 
 The comparison requires an explicitly selected database ending in `_test`.
@@ -137,13 +137,20 @@ base class's per-mention loop. This section re-runs the same corpus and
 methodology through the fixed `PostgresLayer.search_many` (native batching,
 `compare_retrieval.py` unchanged in structure, extended with two new
 measurements) and adds a Redis cache layer measurement that the original
-comparison didn't have at all. This re-run also confirms Task 5b's chunking
-fix: an earlier attempt at this measurement called `search_many` with all
-291 mentions in one request and silently got back empty results for every
-mention because Postgres's 5-second `statement_timeout` canceled the query
-(see Task 5b's fix); the batched measurement below now chunks into
-15-mention calls (matching broadside-ml's `GLINKER_MAX_MENTIONS`) and
-completes as real, bounded work.
+comparison didn't have at all. An earlier attempt at this measurement called
+`search_many` with all 291 mentions in one request and silently got back
+empty results for every mention because Postgres's 5-second
+`statement_timeout` canceled the query — that's what motivated Task 5b's
+`_batch_retrieve_chunked` fix. The batched-throughput measurement below
+calls `search_many` in 15-mention chunks (matching broadside-ml's
+`GLINKER_MAX_MENTIONS`), which is below `_chunk_size()`'s default of 25 and
+so never actually exercises `_batch_retrieve_chunked`'s internal
+chunk-splitting — it just confirms that a request shape a real pipeline run
+actually produces stays well within the timeout on its own. It's the cache
+pass below, which calls `chain.search_many` with the full 291-mention list
+in one request, that exercises the chunking fix: internally that splits
+into roughly a dozen 25-mention chunks, and the cold/warm pass completing
+with zero regressions is the confirmation that Task 5b's fix works.
 
 Same disposable-container methodology, same corpus (SHA-256 as above),
 same 291 mentions.
@@ -206,10 +213,25 @@ KB reload itself requiring explicit per-invocation approval.
 
 ## Code validation
 
-59 L2 tests passed, including isolated PostgreSQL integration, Redis embedding
-hydration/update complexity, per-mention fallback, ES batching, and DSN builder
-coverage. Broadside-ML's 10 tests and Compose configuration validation passed.
-The existing config-builder suite had 47 passes and two failures, reproduced
-against the original `4b86fbe`: stale DictLayer similarity default expectation
-(0.6 versus existing 0.75), and an outdated requirement for mandatory L1.
-No L3 models were downloaded or inference run for this retrieval-only change.
+`uv run --extra dev pytest tests/l2/ -v` (2026-09-14, this branch's tip):
+66 collected, 61 passed, 5 skipped. The 5 skips are
+`tests/l2/test_postgres_integration.py`, which requires a live
+`GLINKER_TEST_DSN` (normalization/description/alias/fuzzy/embeddings,
+query-error rollback, word-boundary + edit-distance filtering, and
+`search_many` parity with sequential search — including a constant-round-trip
+bound) and are expected to skip in this environment, not fail.
+
+Beyond the original PostgreSQL integration, Redis embedding
+hydration/update, per-mention fallback, ES batching, and DSN builder
+coverage, `tests/l2/test_reconciliation.py` now also covers this branch's
+batching and cache work specifically: `PostgresLayer.search_many`'s native
+batched exact/fuzzy dispatch and its restriction of fuzzy retry to unique
+misses; `_batch_retrieve_chunked`'s statement_timeout-safe chunking,
+including that one chunk's failure doesn't lose another chunk's results and
+that a mention whose exact-phase chunk failed is excluded from `search_many`'s
+fuzzy retry rather than re-issued against a connection that may have just
+timed out; `RedisLayer._cache_set`'s `ttl<=0` no-expiry contract (`SET` vs.
+`SETEX`); and the config builder's Postgres DSN/credential preservation and
+Redis password forwarding. Broadside-ML's own test suite and Compose
+configuration validation were not re-run for this docs/fix pass. No L3
+models were downloaded or inference run for this retrieval-only change.

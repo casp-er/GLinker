@@ -287,7 +287,7 @@ class RedisLayer(DatabaseLayer):
         LayerConfig.ttl documents 0 as "no expiry", but every call site here
         used to call SETEX unconditionally, which Redis rejects for ttl=0.
         """
-        if ttl and ttl > 0:
+        if ttl is not None and ttl > 0:
             pipe.setex(key, ttl, data)
         else:
             pipe.set(key, data)
@@ -1012,24 +1012,34 @@ class PostgresLayer(DatabaseLayer):
         if not queries:
             return []
 
-        normalized = self._normalize_many(queries)
-        unique = list(dict.fromkeys(q for q in normalized if q))
-        results_by_query: Dict[str, List[DatabaseRecord]] = {q: [] for q in unique}
-
         try:
+            normalized = self._normalize_many(queries)
+            unique = list(dict.fromkeys(q for q in normalized if q))
+            results_by_query: Dict[str, List[DatabaseRecord]] = {q: [] for q in unique}
+            # Mentions whose exact-phase chunk raised (e.g. a statement_timeout
+            # cancellation). Their empty result is "unknown", not a genuine
+            # miss, so they must NOT be retried via fuzzy search below - that
+            # would turn one failed exact chunk into an exact-timeout-plus-
+            # fuzzy-timeout, doubling the cost in exactly the overload
+            # scenario chunking exists to contain.
+            failed: Set[str] = set()
+
             if unique and "exact" in self.config.search_mode:
-                exact_results = self._batch_retrieve_chunked(unique, fuzzy=False)
-                for query, records in zip(unique, exact_results):
+                exact_results, failed_indices = self._batch_retrieve_chunked(unique, fuzzy=False)
+                for idx, (query, records) in enumerate(zip(unique, exact_results)):
                     results_by_query[query] = records
+                    if idx in failed_indices:
+                        failed.add(query)
 
             missing = [
                 query for query in unique
                 if not results_by_query[query]
+                and query not in failed
                 and "fuzzy" in self.config.search_mode
                 and self.supports_fuzzy()
             ]
             if missing:
-                fuzzy_results = self._batch_retrieve_chunked(missing, fuzzy=True)
+                fuzzy_results, _fuzzy_failed_indices = self._batch_retrieve_chunked(missing, fuzzy=True)
                 for query, records in zip(missing, fuzzy_results):
                     results_by_query[query] = records
         except Exception as e:
@@ -1047,7 +1057,9 @@ class PostgresLayer(DatabaseLayer):
     def _chunk_size(self) -> int:
         return max(1, self.statement_timeout_ms // self._ASSUMED_MS_PER_MENTION)
 
-    def _batch_retrieve_chunked(self, queries: List[str], fuzzy: bool) -> List[List[DatabaseRecord]]:
+    def _batch_retrieve_chunked(
+        self, queries: List[str], fuzzy: bool
+    ) -> "tuple[List[List[DatabaseRecord]], Set[int]]":
         """Splits a large query list into statement_timeout-safe chunks.
 
         A single _batch_retrieve call costs roughly N * per-mention SQL
@@ -1056,9 +1068,19 @@ class PostgresLayer(DatabaseLayer):
         part. Chunking keeps each statement inside a safe margin, and a
         chunk that still fails only empties that chunk's mentions rather
         than the entire search_many call.
+
+        Returns (results, failed_indices): results is a flat list aligned
+        with `queries` (a failed chunk contributes `[]` per mention, same
+        as before); failed_indices holds the positions in `queries` whose
+        chunk raised. Callers must treat those positions as "unknown", not
+        "confirmed no match" - e.g. search_many uses this to skip a fuzzy
+        retry for mentions whose exact chunk already failed, rather than
+        re-issuing a more expensive query against a connection that may
+        just have timed out.
         """
         chunk_size = self._chunk_size()
         results: List[List[DatabaseRecord]] = []
+        failed_indices: Set[int] = set()
         for i in range(0, len(queries), chunk_size):
             chunk = queries[i:i + chunk_size]
             try:
@@ -1066,7 +1088,8 @@ class PostgresLayer(DatabaseLayer):
             except Exception as e:
                 print(f"[ERROR Postgres] Chunk search error ({len(chunk)} mentions): {e}")
                 results.extend([[] for _ in chunk])
-        return results
+                failed_indices.update(range(i, i + len(chunk)))
+        return results, failed_indices
 
     def _batch_retrieve(self, queries: List[str], fuzzy: bool) -> List[List[DatabaseRecord]]:
         """Resolve many already-normalized queries in one round trip.

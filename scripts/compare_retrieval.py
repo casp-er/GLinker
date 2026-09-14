@@ -131,6 +131,15 @@ def compare(args):
                 config={"host": args.redis_host, "port": int(args.redis_port), "db": 0},
             )
         )
+        existing_keys = redis_layer.client.dbsize()
+        if existing_keys != 0:
+            redis_layer.client.close()
+            raise ValueError(
+                f"Comparison requires an empty Redis database (got {existing_keys} "
+                "keys) — refusing to run redis_layer.clear() against a database "
+                "that isn't a known-empty throwaway, since it deletes every "
+                "entity:* key"
+            )
         chain = DatabaseChainComponent(L2Config(layers=[]))
         chain.layers = [redis_layer, pg]
         try:
