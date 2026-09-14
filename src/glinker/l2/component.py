@@ -280,6 +280,18 @@ class RedisLayer(DatabaseLayer):
             decode_responses=False,
         )
 
+    @staticmethod
+    def _cache_set(pipe, key: str, ttl: int, data: str):
+        """SETEX with a positive ttl; SET (no expiry) when ttl <= 0.
+
+        LayerConfig.ttl documents 0 as "no expiry", but every call site here
+        used to call SETEX unconditionally, which Redis rejects for ttl=0.
+        """
+        if ttl and ttl > 0:
+            pipe.setex(key, ttl, data)
+        else:
+            pipe.set(key, data)
+
     def supports_fuzzy(self) -> bool:
         return False
 
@@ -353,11 +365,11 @@ class RedisLayer(DatabaseLayer):
                         "embedding": embedding,
                         "embedding_model_id": embedding_model_id
                     })
-                    pipe.setex(emb_key, ttl, emb_data)
+                    self._cache_set(pipe, emb_key, ttl, emb_data)
 
             # Store main cache data
             data = json.dumps(records_data)
-            pipe.setex(cache_key, ttl, data)
+            self._cache_set(pipe, cache_key, ttl, data)
             pipe.execute()
 
         except Exception as e:
@@ -386,14 +398,14 @@ class RedisLayer(DatabaseLayer):
             # Store by label
             label_key = f"entity:{entity.label.lower()}"
             if overwrite or not self.client.exists(label_key):
-                pipe.setex(label_key, self.ttl, data_json)
+                self._cache_set(pipe, label_key, self.ttl, data_json)
                 count += 1
 
             # Store by aliases
             for alias in entity.aliases:
                 alias_key = f"entity:{alias.lower()}"
                 if overwrite or not self.client.exists(alias_key):
-                    pipe.setex(alias_key, self.ttl, data_json)
+                    self._cache_set(pipe, alias_key, self.ttl, data_json)
 
             # Store embedding SEPARATELY (no duplication)
             if embedding is not None:
@@ -402,7 +414,7 @@ class RedisLayer(DatabaseLayer):
                     "embedding": embedding,
                     "embedding_model_id": embedding_model_id
                 })
-                pipe.setex(emb_key, self.ttl, emb_data)
+                self._cache_set(pipe, emb_key, self.ttl, emb_data)
 
             # Execute in batches
             if len(pipe) >= batch_size:
@@ -500,7 +512,7 @@ class RedisLayer(DatabaseLayer):
                 "embedding": embedding,
                 "embedding_model_id": model_id
             })
-            pipe.setex(emb_key, self.ttl, emb_data)
+            self._cache_set(pipe, emb_key, self.ttl, emb_data)
             count += 1
 
             # Execute in batches of 1000

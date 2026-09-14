@@ -99,3 +99,30 @@ def test_builder_preserves_postgres_dsn_without_overriding_credentials():
         "schema": "kb",
         "connect_timeout": 5,
     }
+
+
+def test_redis_cache_set_uses_setex_for_positive_ttl_and_set_for_no_expiry():
+    with patch("glinker.l2.component.redis.Redis") as client:
+        layer = RedisLayer(LayerConfig(type="redis", priority=0))
+    record = DatabaseRecord(entity_id="Q1", label="One")
+    pipe = client.return_value.pipeline.return_value
+
+    layer.write_cache("alias", [record], 3600)
+    assert pipe.setex.call_args.args[0] == "entity:alias"
+    assert pipe.set.call_count == 0
+
+    layer.write_cache("alias", [record], 0)
+    assert pipe.set.call_args.args[0] == "entity:alias"
+
+
+def test_builder_forwards_redis_password():
+    from glinker.core.builders import ConfigBuilder
+
+    builder = ConfigBuilder(name="test")
+    builder.l2.add("redis", host="cache.internal", port=6379, db=1, password="secret")
+    assert builder._l2_layers[0]["config"] == {
+        "host": "cache.internal",
+        "port": 6379,
+        "db": 1,
+        "password": "secret",
+    }

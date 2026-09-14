@@ -173,7 +173,8 @@ class ConfigBuilder:
                 layer["config"] = {
                     "host": db_config.get("host", "localhost"),
                     "port": db_config.get("port", 6379),
-                    "db": db_config.get("db", 0)
+                    "db": db_config.get("db", 0),
+                    "password": db_config.get("password"),
                 }
 
             elif layer_type == "elasticsearch":
