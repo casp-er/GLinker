@@ -128,6 +128,82 @@ Use disposable services, never a production ES endpoint. Full-KB index size,
 load time, latency/concurrency under the intended RAM budget, and downstream
 L3 quality remain deployment acceptance checks.
 
+## Batching and cache re-validation, 2026-09-14
+
+The 2026-09-14 comparison above measured `search_many` called with exactly
+one mention per case — the same shape as the pre-fix code path, since
+PostgresLayer had no batching override and search_many degraded to the
+base class's per-mention loop. This section re-runs the same corpus and
+methodology through the fixed `PostgresLayer.search_many` (native batching,
+`compare_retrieval.py` unchanged in structure, extended with two new
+measurements) and adds a Redis cache layer measurement that the original
+comparison didn't have at all. This re-run also confirms Task 5b's chunking
+fix: an earlier attempt at this measurement called `search_many` with all
+291 mentions in one request and silently got back empty results for every
+mention because Postgres's 5-second `statement_timeout` canceled the query
+(see Task 5b's fix); the batched measurement below now chunks into
+15-mention calls (matching broadside-ml's `GLINKER_MAX_MENTIONS`) and
+completes as real, bounded work.
+
+Same disposable-container methodology, same corpus (SHA-256 as above),
+same 291 mentions.
+
+| Result | Value |
+|---|---:|
+| Corpus recall (top three), sequential per-mention | 290/291 |
+| Batched throughput, whole corpus in 15-mention `search_many` chunks | 3050.39 ms total, 10.48 ms/mention |
+| Cold cache pass (Redis empty, populates via cache writeback) | 11.22 ms/mention |
+| Warm cache pass (same 291 mentions repeated) | 0.33 ms/mention |
+
+Regressions vs. the sequential per-mention baseline: none. Both
+`batched.regressions_vs_sequential` and `cache.regressions_vs_sequential`
+were empty lists, and `summary.pg_regressions` was also empty.
+
+Carrying forward the "not a controlled benchmark" caveat from the section
+above: the batched measurement runs immediately after a full sequential
+pass over the same 291 mentions, in the same script invocation, so
+Postgres's OS/shared-buffer cache is already warm by the time batching is
+measured — the same kind of host/cache-state variance the section above
+documented as an ~8.5x swing (85.41 ms vs. 9.99 ms median) on *identical*
+unbatched code. The drop from that section's 85.41 ms median to this
+section's 10.48 ms/mention batched figure reflects both batching's
+round-trip amortization and this warm-cache effect; this comparison does
+not isolate how much of the improvement is attributable to each.
+
+The batched-throughput number is nonetheless the one that matters for a
+real pipeline run: NER surfaces multiple mentions per article
+(`GLINKER_MAX_MENTIONS=15` in broadside-ml), and the pre-fix per-mention
+round-trip cost compounded linearly with mention count regardless of cache
+state. The warm-cache number is the one that matters for steady-state
+production traffic, where the same countries/public figures/organizations
+recur across articles.
+
+### Redis TTL and cache invalidation
+
+`RedisLayer.write_cache` previously ignored `LayerConfig.ttl`'s documented
+"0 = no expiry" contract entirely — every write used `SETEX`, which Redis
+rejects outright for `ttl<=0`. That's now implemented (`RedisLayer._cache_set`
+uses plain `SET` when `ttl<=0`), so a genuinely non-expiring cache is
+possible. broadside-ml's wiring does not use it: the KB only changes on an
+explicit operator-approved `scripts/load_postgres.py --overwrite` reload,
+but a non-expiring cache means any reload that isn't paired with a manual
+flush leaves stale candidates (outdated popularity/aliases/descriptions)
+cached indefinitely with no automatic recovery. broadside-ml instead uses a
+long, finite default TTL (`GLINKER_REDIS_TTL`, default 7 days — longer than
+Elasticsearch's 86400s default cache TTL, since the KB changes far less
+often than that comparison implies) as a safety net: a missed manual flush
+self-heals within a week instead of never.
+
+**Cache invalidation on KB reload:** after any `scripts/load_postgres.py
+--overwrite` run against broadside-ml's Postgres KB, flush the Redis cache
+layer before restarting (or alongside restarting) the encoder — either
+`DatabaseChainComponent.get_layer("redis").clear()` from a Python shell
+against the running pipeline, or `redis-cli -h <host> -p <port> -a
+<password> FLUSHDB` against the dedicated Redis DB index broadside-ml uses
+(not the whole Redis instance — broadside's own application data may share
+that instance on a different DB index). This is a manual step, same as the
+KB reload itself requiring explicit per-invocation approval.
+
 ## Code validation
 
 59 L2 tests passed, including isolated PostgreSQL integration, Redis embedding
