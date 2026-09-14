@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
+from collections import defaultdict
 from typing import List, Dict, Any, Set, Union
 from pathlib import Path
+import re
 import redis
 import json
 from elasticsearch import Elasticsearch
@@ -952,9 +954,7 @@ class PostgresLayer(DatabaseLayer):
                 WHERE a.entity_id = c.entity_id ORDER BY a.alias) AS aliases
             FROM candidates c ORDER BY c.score DESC, c.popularity DESC, c.entity_id
         """ % " UNION ALL ".join(branches)
-        import re
-        pattern = (r"\m" if query[0].isalnum() else "") + re.escape(query)
-        pattern += r"\M" if query[-1].isalnum() else ""
+        pattern = self._exact_pattern(query)
         with self.conn:
             with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute("SELECT set_config('statement_timeout', %s, true)",
@@ -964,6 +964,140 @@ class PostgresLayer(DatabaseLayer):
                 cursor.execute(statement, {"query": query, "pattern": pattern,
                                            "distance": self.fuzzy_config.max_distance})
                 return self._process_rows(cursor.fetchall())
+
+    def _exact_pattern(self, query: str) -> str:
+        """Word-bounded, escaped regex pattern for exact retrieval."""
+        pattern = (r"\m" if query[0].isalnum() else "") + re.escape(query)
+        pattern += r"\M" if query[-1].isalnum() else ""
+        return pattern
+
+    def _normalize_many(self, queries: List[str]) -> List[str]:
+        """Fold many queries with the shared DB function in one round trip."""
+        with self.conn:
+            with self.conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT glinker_fold(q) FROM unnest(%(queries)s::text[]) "
+                    "WITH ORDINALITY AS t(q, ord) ORDER BY ord",
+                    {"queries": queries},
+                )
+                return [row[0] for row in cursor.fetchall()]
+
+    def search_many(self, queries: List[str]) -> List[List[DatabaseRecord]]:
+        """Resolve many mentions in a bounded number of round trips.
+
+        The base class default (DatabaseLayer.search_many) issues a full
+        search()/search_fuzzy() round trip per mention — a full database
+        round trip for every single entity mention, serially. This override
+        normalizes, exact-searches, and fuzzy-searches (only for exact
+        misses) each in a single batched statement, mirroring
+        ElasticsearchLayer._msearch.
+        """
+        if not queries:
+            return []
+
+        normalized = self._normalize_many(queries)
+        unique = list(dict.fromkeys(q for q in normalized if q))
+        results_by_query: Dict[str, List[DatabaseRecord]] = {q: [] for q in unique}
+
+        try:
+            if unique and "exact" in self.config.search_mode:
+                exact_results = self._batch_retrieve(unique, fuzzy=False)
+                for query, records in zip(unique, exact_results):
+                    results_by_query[query] = records
+
+            missing = [
+                query for query in unique
+                if not results_by_query[query]
+                and "fuzzy" in self.config.search_mode
+                and self.supports_fuzzy()
+            ]
+            if missing:
+                fuzzy_results = self._batch_retrieve(missing, fuzzy=True)
+                for query, records in zip(missing, fuzzy_results):
+                    results_by_query[query] = records
+        except Exception as e:
+            print(f"[ERROR Postgres] Batched search error: {e}")
+            return [[] for _ in queries]
+
+        return [results_by_query.get(query, []) for query in normalized]
+
+    def _batch_retrieve(self, queries: List[str], fuzzy: bool) -> List[List[DatabaseRecord]]:
+        """Resolve many already-normalized queries in one round trip.
+
+        Mirrors _retrieve's three weighted branches (label/alias/description),
+        but each branch is a LATERAL subquery correlated to the per-mention
+        input row, so the planner can still use a parameterized index-nested
+        loop per mention (same index eligibility as the single-query path)
+        instead of one unparameterized scan.
+        """
+        if fuzzy:
+            predicate = (
+                "{field} %% i.query AND length({field}) <= 255 "
+                "AND length(i.query) <= 255 "
+                "AND abs(length({field}) - length(i.query)) <= %(distance)s "
+                "AND levenshtein_less_equal(left({field}, 255), left(i.query, 255), "
+                "%(distance)s) <= %(distance)s"
+            )
+            score = "similarity({field}, i.query)"
+            patterns: List[Any] = [None] * len(queries)
+        else:
+            predicate = "{field} ~ i.pattern"
+            score = "1.0"
+            patterns = [self._exact_pattern(q) for q in queries]
+
+        branches = []
+        for table, field, weight in [
+            ("entities", "label_folded", 2.0),
+            ("aliases", "alias_folded", 1.5),
+            ("entities", "description_folded", 1.0),
+        ]:
+            branches.append(
+                f"SELECT entity_id, {weight} * {score.format(field=field)} AS score "
+                f"FROM {table} WHERE {predicate.format(field=field)}"
+            )
+        matches_lateral = " UNION ALL ".join(branches)
+
+        statement = """
+            WITH input AS (
+                SELECT * FROM unnest(%(queries)s::text[], %(patterns)s::text[])
+                    WITH ORDINALITY AS t(query, pattern, idx)
+            ),
+            matches AS (
+                SELECT i.idx, m.entity_id, m.score
+                FROM input i, LATERAL ( __MATCHES__ ) m
+            ),
+            ranked AS (
+                SELECT idx, entity_id, max(score) AS score FROM matches GROUP BY idx, entity_id
+            ),
+            candidates AS (
+                SELECT idx, e.*, r.score,
+                       row_number() OVER (
+                           PARTITION BY idx ORDER BY r.score DESC, e.popularity DESC, e.entity_id
+                       ) AS rn
+                FROM ranked r JOIN entities e USING (entity_id)
+            )
+            SELECT c.*, ARRAY(
+                SELECT a.alias FROM aliases a WHERE a.entity_id = c.entity_id ORDER BY a.alias
+            ) AS aliases
+            FROM candidates c WHERE c.rn <= 50
+            ORDER BY c.idx, c.score DESC, c.popularity DESC, c.entity_id
+        """.replace("__MATCHES__", matches_lateral)
+
+        rows_by_idx: Dict[int, List[Dict]] = defaultdict(list)
+        with self.conn:
+            with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("SELECT set_config('statement_timeout', %s, true)",
+                               (str(self.statement_timeout_ms),))
+                cursor.execute("SELECT set_config('pg_trgm.similarity_threshold', %s, true)",
+                               (str(self.fuzzy_config.min_similarity),))
+                cursor.execute(statement, {
+                    "queries": queries, "patterns": patterns,
+                    "distance": self.fuzzy_config.max_distance,
+                })
+                for row in cursor.fetchall():
+                    rows_by_idx[row["idx"]].append(dict(row))
+
+        return [self._process_rows(rows_by_idx.get(idx, [])) for idx in range(1, len(queries) + 1)]
 
     def _process_rows(self, rows: List[Dict]) -> List[DatabaseRecord]:
         records = []
