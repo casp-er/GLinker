@@ -3,7 +3,7 @@
 import json
 from unittest.mock import MagicMock, patch
 
-from glinker.l2.component import DatabaseChainComponent, RedisLayer, ElasticsearchLayer
+from glinker.l2.component import DatabaseChainComponent, RedisLayer, ElasticsearchLayer, PostgresLayer
 from glinker.l2.models import DatabaseRecord, LayerConfig, L2Config
 
 
@@ -63,6 +63,30 @@ def test_es_fuzzy_batch_only_for_missing_unique_mentions():
     layer._msearch = MagicMock(side_effect=[[[one], []], [[two]]])
     assert layer.search_many(["One", "two", "one"]) == [[one], [two], [one]]
     assert layer._msearch.call_args_list[1].args[0] == [("two", True)]
+
+
+def test_postgres_fuzzy_batch_only_for_missing_unique_mentions():
+    with patch.object(PostgresLayer, "_setup", return_value=None):
+        layer = PostgresLayer(
+            LayerConfig(
+                type="postgres",
+                priority=0,
+                search_mode=["exact", "fuzzy"],
+                config={"dsn": "service=test"},
+            )
+        )
+    one = DatabaseRecord(entity_id="Q1", label="one")
+    two = DatabaseRecord(entity_id="Q2", label="two")
+    layer._normalize_many = MagicMock(return_value=["one", "two", "one"])
+    layer._batch_retrieve = MagicMock(side_effect=[[[one], []], [[two]]])
+
+    assert layer.search_many(["One", "two", "one"]) == [[one], [two], [one]]
+
+    exact_call, fuzzy_call = layer._batch_retrieve.call_args_list
+    assert exact_call.args == (["one", "two"],)
+    assert exact_call.kwargs == {"fuzzy": False}
+    assert fuzzy_call.args == (["two"],)
+    assert fuzzy_call.kwargs == {"fuzzy": True}
 
 
 def test_builder_preserves_postgres_dsn_without_overriding_credentials():
