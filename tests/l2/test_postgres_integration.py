@@ -32,7 +32,9 @@ def pg():
     cfg = parse_dsn(dsn)
     cfg["database"] = cfg.pop("dbname")
     cfg["schema"] = schema
-    layer = PostgresLayer(LayerConfig(type="postgres", priority=0, config=cfg))
+    layer = PostgresLayer(
+        LayerConfig(type="postgres", priority=0, search_mode=["exact", "fuzzy"], config=cfg)
+    )
     try:
         yield layer
     finally:
@@ -85,3 +87,77 @@ def test_word_boundaries_and_edit_distance_reject_popular_noise(pg):
     )
     assert [r.entity_id for r in pg.search("Acre")] == ["target"]
     assert [r.entity_id for r in pg.search_fuzzy("Delivrance")] == ["target"]
+
+
+def test_search_many_matches_sequential_search_and_search_fuzzy(pg):
+    pg.load_bulk([
+        DatabaseRecord(entity_id="Q1", label="Straße São Ｐａｕｌｏ", popularity=5),
+        DatabaseRecord(entity_id="Q2", label="Deliverance", aliases=["Acre"], popularity=1),
+        DatabaseRecord(entity_id="Q3", label="trance", description="massacre", popularity=1000),
+    ])
+
+    mentions = ["STRASSE SAO Paulo", "Acre", "Delivrance", "no such entity", "Acre"]
+    batched = pg.search_many(mentions)
+
+    sequential = []
+    for mention in mentions:
+        exact = pg.search(mention)
+        sequential.append(exact if exact else pg.search_fuzzy(mention))
+
+    assert [[r.entity_id for r in result] for result in batched] == [
+        [r.entity_id for r in result] for result in sequential
+    ]
+    assert [r.entity_id for r in batched[0]] == ["Q1"]
+    assert [r.entity_id for r in batched[1]] == ["Q2"]
+    assert [r.entity_id for r in batched[2]] == ["Q2"]  # fuzzy fallback
+    assert batched[3] == []
+    assert batched[1] == batched[4]  # duplicate mention, same result
+
+
+class _CursorCountingConn:
+    """Wraps a real psycopg2 connection to count `cursor()` open calls.
+
+    psycopg2.extensions.connection is an immutable C type: it has no
+    `__dict__` (dictoffset 0) and rejects attribute assignment on both the
+    instance and the class ("cannot set 'cursor' attribute of immutable
+    type"), confirmed against psycopg2-binary 2.9.13 / Python 3.14 in this
+    environment. `unittest.mock.patch.object(pg.conn, "cursor", ...)`
+    therefore cannot spy on a real connection at all -- it fails during
+    __enter__/__exit__ with AttributeError before any query runs. This
+    proxy gets the same spy behavior by wrapping `pg.conn` itself (a plain
+    Python attribute on PostgresLayer, which has no such restriction).
+    """
+
+    def __init__(self, real_conn):
+        self._real_conn = real_conn
+        self.call_count = 0
+
+    def cursor(self, *args, **kwargs):
+        self.call_count += 1
+        return self._real_conn.cursor(*args, **kwargs)
+
+    def __enter__(self):
+        return self._real_conn.__enter__()
+
+    def __exit__(self, *exc_info):
+        return self._real_conn.__exit__(*exc_info)
+
+    def __getattr__(self, name):
+        return getattr(self._real_conn, name)
+
+
+def test_search_many_uses_a_constant_number_of_round_trips(pg):
+    pg.load_bulk([
+        DatabaseRecord(entity_id=f"Q{i}", label=f"Entity{i}", popularity=i)
+        for i in range(20)
+    ])
+    mentions = [f"Entity{i}" for i in range(20)]
+
+    spy = _CursorCountingConn(pg.conn)
+    pg.conn = spy
+    pg.search_many(mentions)
+    # Bounded by mention count is what we're fixing away from: 20 mentions
+    # should not need anywhere near 20 cursor()-openings. Normalize (1) +
+    # exact batch (1) is 2; nothing here should need fuzzy fallback since
+    # every mention is an exact label match.
+    assert spy.call_count <= 4
