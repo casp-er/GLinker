@@ -41,11 +41,75 @@ def test_partial_layer_hits_continue_for_missing_mentions():
     first.search_many.return_value = [[cached]]  # Short backend response.
     second.search_many.return_value = [[fetched]]
     chain.layers = [first, second]
-    chain._cache_write = MagicMock()
+    chain._cache_write_many = MagicMock()
     result = chain.batch_search(["one", "two"])
     assert result == [[cached], [fetched]]
     second.search_many.assert_called_once_with(["two"])
-    assert chain._cache_write.call_count == 2
+    assert chain._cache_write_many.call_count == 2
+
+
+def test_redis_search_many_batches_query_and_embedding_reads():
+    with patch("glinker.l2.component.redis.Redis") as client:
+        layer = RedisLayer(LayerConfig(type="redis", priority=1))
+    pipe = client.return_value.pipeline.return_value
+    record = DatabaseRecord(entity_id="Q1", label="One")
+    cached_record = json.dumps([record.model_dump()])
+    cached_embedding = json.dumps({"embedding": [1.0], "embedding_model_id": "model"})
+    pipe.execute.side_effect = [
+        [cached_record, None],
+        [cached_embedding],
+    ]
+
+    results = layer.search_many(["One", "missing", "one"])
+
+    assert [[record.entity_id for record in result] for result in results] == [
+        ["Q1"], [], ["Q1"]
+    ]
+    assert results[0][0].embedding == [1.0]
+    assert pipe.execute.call_count == 2
+
+
+def test_chain_batches_cache_writeback_for_many_hits():
+    chain = DatabaseChainComponent(L2Config(layers=[]))
+    cache = MagicMock()
+    cache.priority = 1
+    cache.write = True
+    cache.cache_policy = "always"
+    cache.ttl = 60
+    cache.is_available.return_value = True
+    cache.search_many.return_value = [[], []]
+    source = MagicMock()
+    source.priority = 0
+    source.write = False
+    source.is_available.return_value = True
+    records = [
+        DatabaseRecord(entity_id="Q1", label="one"),
+        DatabaseRecord(entity_id="Q2", label="two"),
+    ]
+    source.search_many.return_value = [[records[0]], [records[1]]]
+    chain.layers = [cache, source]
+
+    assert chain.search_many(["one", "two"]) == [[records[0]], [records[1]]]
+    cache.write_cache_many.assert_called_once_with(
+        [("one", [records[0]]), ("two", [records[1]])], 60
+    )
+
+
+def test_redis_write_cache_many_uses_one_pipeline_execution():
+    with patch("glinker.l2.component.redis.Redis") as client:
+        layer = RedisLayer(LayerConfig(type="redis", priority=1))
+    pipe = client.return_value.pipeline.return_value
+    records = [
+        DatabaseRecord(entity_id="Q1", label="one"),
+        DatabaseRecord(entity_id="Q2", label="two"),
+    ]
+
+    layer.write_cache_many([("one", [records[0]]), ("two", [records[1]])], 60)
+
+    assert pipe.execute.call_count == 1
+    assert [call.args[0] for call in pipe.setex.call_args_list] == [
+        "entity:one", "entity:two"
+    ]
 
 
 def test_es_fuzzy_batch_only_for_missing_unique_mentions():
@@ -181,3 +245,22 @@ def test_postgres_search_many_skips_fuzzy_retry_for_failed_chunk_mentions():
 
     # Only the exact phase should run - no fuzzy retry for "two".
     layer._batch_retrieve_chunked.assert_called_once_with(["one", "two"], fuzzy=False)
+
+
+def test_postgres_overwrite_invalidates_changed_label_embeddings():
+    with patch.object(PostgresLayer, "_setup", return_value=None):
+        layer = PostgresLayer(
+            LayerConfig(type="postgres", priority=0, config={"dsn": "service=test"})
+        )
+    layer.conn = MagicMock()
+    cursor = layer.conn.cursor.return_value
+    with patch("glinker.l2.component.execute_batch") as execute_batch:
+        layer.load_bulk(
+            [DatabaseRecord(entity_id="Q1", label="New", description="New description")],
+            overwrite=True,
+        )
+
+    entity_upsert = execute_batch.call_args_list[0].args[1]
+    assert "THEN NULL ELSE entities.embedding END" in entity_upsert
+    assert "THEN NULL ELSE entities.embedding_model_id END" in entity_upsert
+    cursor.close.assert_called_once()

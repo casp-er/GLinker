@@ -326,19 +326,24 @@ class L3Processor(BaseProcessor[L3Config, L3Input, L3Output]):
                             if alias not in label_to_candidate:
                                 label_to_candidate[alias] = c
 
-        # Precompute per-field max across candidates for normalization
+        # Normalize within each predicted mention span. ``candidates`` is the
+        # flattened candidate list for the whole text, so a single global max
+        # lets an unrelated, very popular entity suppress the confidence of
+        # every other mention in the article.
         field_max = {}
         for rank_spec in self.schema['ranking']:
             field = rank_spec['field']
             if field == 'gliner_score':
                 continue
-            max_val = 0
-            for c in candidates:
-                if hasattr(c, field):
-                    val = getattr(c, field, 0)
-                    if isinstance(val, (int, float)) and val > max_val:
-                        max_val = val
-            field_max[field] = max_val if max_val > 0 else 1
+            maxima = {}
+            for entity in entities:
+                candidate = label_to_candidate.get(entity.label)
+                if candidate and hasattr(candidate, field):
+                    value = getattr(candidate, field, 0)
+                    if isinstance(value, (int, float)):
+                        span = (entity.start, entity.end)
+                        maxima[span] = max(maxima.get(span, 0), value)
+            field_max[field] = maxima
 
         for entity in entities:
             total_score = 0.0
@@ -356,7 +361,9 @@ class L3Processor(BaseProcessor[L3Config, L3Input, L3Output]):
                     if candidate and hasattr(candidate, field):
                         value = getattr(candidate, field, 0)
                         if isinstance(value, (int, float)):
-                            total_score += (value / field_max[field]) * weight
+                            denominator = field_max[field].get((entity.start, entity.end), 0)
+                            if denominator > 0:
+                                total_score += (value / denominator) * weight
 
             if total_weight > 0:
                 entity.score = total_score / total_weight

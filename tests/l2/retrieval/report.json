@@ -16285,6 +16285,20 @@
     "pg_regressions": [],
     "top3_set_agreement": 45
   },
+  "batched": {
+    "mentions": 291,
+    "total_ms": 3050.39,
+    "per_mention_ms": 10.48,
+    "regressions_vs_sequential": []
+  },
+  "cache": {
+    "mentions": 291,
+    "cold_total_ms": 3264.54,
+    "cold_per_mention_ms": 11.22,
+    "warm_total_ms": 96.44,
+    "warm_per_mention_ms": 0.33,
+    "regressions_vs_sequential": []
+  },
   "index_plans": [
     [
       {

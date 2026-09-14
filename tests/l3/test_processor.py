@@ -158,6 +158,40 @@ class TestL3ProcessorRanking:
         assert isinstance(ranked, list)
         assert len(ranked) == 2
 
+    def test_popularity_normalization_is_isolated_per_mention(self, l3_config_dict):
+        from glinker.l2.models import DatabaseRecord
+        from glinker.l3.models import L3Entity
+
+        processor = create_processor("l3_batch", l3_config_dict)
+        processor.schema = {
+            "template": "{label}",
+            "ranking": [
+                {"field": "gliner_score", "weight": 0.7},
+                {"field": "popularity", "weight": 0.3},
+            ],
+        }
+        candidates = [
+            DatabaseRecord(entity_id="1", label="Local", popularity=1),
+            DatabaseRecord(entity_id="2", label="Global", popularity=1_000_000),
+        ]
+        mapping = {candidate.label: candidate for candidate in candidates}
+
+        local_only = L3Entity(text="Local", label="Local", start=0, end=5, score=0.31)
+        processor._rank_entities([local_only], candidates[:1], {"Local": candidates[0]})
+
+        local_with_other_mention = L3Entity(
+            text="Local", label="Local", start=0, end=5, score=0.31
+        )
+        global_entity = L3Entity(
+            text="Global", label="Global", start=10, end=16, score=0.9
+        )
+        processor._rank_entities(
+            [local_with_other_mention, global_entity], candidates, mapping
+        )
+
+        assert local_with_other_mention.score == local_only.score
+        assert local_with_other_mention.score > 0.3
+
 
 class TestL3ProcessorPrecomputed:
     """Tests for precomputed embeddings usage."""

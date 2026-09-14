@@ -68,6 +68,13 @@ class DatabaseLayer(ABC):
     def write_cache(self, key: str, records: List[DatabaseRecord], ttl: int):
         """Write records to cache"""
         pass
+
+    def write_cache_many(
+        self, entries: List[tuple[str, List[DatabaseRecord]]], ttl: int
+    ):
+        """Write multiple query results, with a correct per-entry fallback."""
+        for key, records in entries:
+            self.write_cache(key, records, ttl)
     
     @abstractmethod
     def is_available(self) -> bool:
@@ -326,6 +333,28 @@ class RedisLayer(DatabaseLayer):
 
         return []
 
+    @staticmethod
+    def _decode_records(data) -> List[DatabaseRecord]:
+        """Decode one cached query result without issuing Redis commands."""
+        if not data:
+            return []
+        if isinstance(data, bytes):
+            data = data.decode("utf-8")
+        records_data = json.loads(data)
+        if isinstance(records_data, dict):
+            records_data = [records_data]
+        if not isinstance(records_data, list):
+            return []
+
+        records = []
+        for record_data in records_data:
+            if isinstance(record_data, dict):
+                record_data["source"] = "redis"
+                records.append(DatabaseRecord(**record_data))
+            elif isinstance(record_data, DatabaseRecord):
+                records.append(record_data)
+        return records
+
     def search(self, query: str) -> List[DatabaseRecord]:
         records = self._search_records(query)
         embeddings = self.get_embeddings_batch([r.entity_id for r in records])
@@ -335,6 +364,42 @@ class RedisLayer(DatabaseLayer):
                 record.embedding = data.get("embedding")
                 record.embedding_model_id = data.get("embedding_model_id")
         return records
+
+    def search_many(self, queries: List[str]) -> List[List[DatabaseRecord]]:
+        """Fetch all query keys and embeddings in two Redis round trips."""
+        if not queries:
+            return []
+
+        normalized = [self.normalize_query(query) for query in queries]
+        unique = list(dict.fromkeys(normalized))
+        try:
+            pipe = self.client.pipeline()
+            for query in unique:
+                pipe.get(f"entity:{query}")
+            payloads = pipe.execute()
+
+            records_by_query = {}
+            entity_ids = []
+            seen_ids = set()
+            for query, payload in zip(unique, payloads):
+                records = self._decode_records(payload)
+                records_by_query[query] = records
+                for record in records:
+                    if record.entity_id not in seen_ids:
+                        seen_ids.add(record.entity_id)
+                        entity_ids.append(record.entity_id)
+
+            embeddings = self.get_embeddings_batch(entity_ids)
+            for records in records_by_query.values():
+                for record in records:
+                    if record.entity_id in embeddings:
+                        data = embeddings[record.entity_id]
+                        record.embedding = data.get("embedding")
+                        record.embedding_model_id = data.get("embedding_model_id")
+            return [records_by_query.get(query, []) for query in normalized]
+        except Exception as e:
+            print(f"[ERROR Redis] Batched search error: {e}")
+            return [[] for _ in queries]
 
     def search_fuzzy(self, query: str) -> List[DatabaseRecord]:
         return []
@@ -374,6 +439,37 @@ class RedisLayer(DatabaseLayer):
 
         except Exception as e:
             print(f"[ERROR Redis] Write error: {e}")
+
+    def write_cache_many(
+        self, entries: List[tuple[str, List[DatabaseRecord]]], ttl: int
+    ):
+        """Write all cache results in one Redis pipeline execution."""
+        if not entries:
+            return
+        try:
+            pipe = self.client.pipeline()
+            for key, records in entries:
+                cache_key = f"entity:{self.normalize_query(key)}"
+                records_data = []
+                for record in records:
+                    record_data = record.dict()
+                    embedding = record_data.pop("embedding", None)
+                    embedding_model_id = record_data.pop("embedding_model_id", None)
+                    records_data.append(record_data)
+                    if embedding is not None:
+                        self._cache_set(
+                            pipe,
+                            f"entity:emb:{record.entity_id}",
+                            ttl,
+                            json.dumps({
+                                "embedding": embedding,
+                                "embedding_model_id": embedding_model_id,
+                            }),
+                        )
+                self._cache_set(pipe, cache_key, ttl, json.dumps(records_data))
+            pipe.execute()
+        except Exception as e:
+            print(f"[ERROR Redis] Batched write error: {e}")
 
     def load_bulk(
         self, entities: List[DatabaseRecord], overwrite: bool = False, batch_size: int = 1000
@@ -1204,7 +1300,15 @@ class PostgresLayer(DatabaseLayer):
                         label = EXCLUDED.label,
                         description = EXCLUDED.description,
                         entity_type = EXCLUDED.entity_type,
-                        popularity = EXCLUDED.popularity
+                        popularity = EXCLUDED.popularity,
+                        embedding = CASE
+                            WHEN entities.label IS DISTINCT FROM EXCLUDED.label
+                              OR entities.description IS DISTINCT FROM EXCLUDED.description
+                            THEN NULL ELSE entities.embedding END,
+                        embedding_model_id = CASE
+                            WHEN entities.label IS DISTINCT FROM EXCLUDED.label
+                              OR entities.description IS DISTINCT FROM EXCLUDED.description
+                            THEN NULL ELSE entities.embedding_model_id END
                 """
             else:
                 entity_query = """
@@ -1440,17 +1544,36 @@ class DatabaseChainComponent(BaseComponent[L2Config]):
 
             layer_results = layer.search_many([mentions[index] for index in pending])
             next_pending = []
+            cache_entries = []
             for position, index in enumerate(pending):
                 candidates = layer_results[position] if position < len(layer_results) else []
                 candidates = self.deduplicate_candidates(candidates)
                 if candidates:
                     results[index] = candidates
-                    self._cache_write(mentions[index], candidates, layer)
+                    cache_entries.append((mentions[index], candidates))
                 else:
                     next_pending.append(index)
+            self._cache_write_many(cache_entries, layer)
             pending = next_pending
 
         return results
+
+    def _cache_write_many(
+        self,
+        entries: List[tuple[str, List[DatabaseRecord]]],
+        source_layer: DatabaseLayer,
+    ):
+        """Write a batch of results to eligible higher-priority cache layers."""
+        if not entries:
+            return
+        for layer in self.layers:
+            if layer.priority <= source_layer.priority or not layer.write:
+                continue
+            if layer.cache_policy == "always":
+                layer.write_cache_many(entries, layer.ttl)
+            else:
+                for query, results in entries:
+                    self._cache_write_to_layer(query, results, layer)
     
     def batch_search(self, mentions: List[str]) -> List[List[DatabaseRecord]]:
         """Compatibility alias with per-mention fallback and cache writeback."""
@@ -1464,17 +1587,22 @@ class DatabaseChainComponent(BaseComponent[L2Config]):
                 continue
             if not layer.write:
                 continue
-            
-            if layer.cache_policy == "always":
+            self._cache_write_to_layer(query, results, layer)
+
+    @staticmethod
+    def _cache_write_to_layer(
+        query: str, results: List[DatabaseRecord], layer: DatabaseLayer
+    ):
+        if layer.cache_policy == "always":
+            layer.write_cache(query, results, layer.ttl)
+        elif layer.cache_policy == "miss":
+            existing = layer.search(query)
+            if not existing:
                 layer.write_cache(query, results, layer.ttl)
-            elif layer.cache_policy == "miss":
-                existing = layer.search(query)
-                if not existing:
-                    layer.write_cache(query, results, layer.ttl)
-            elif layer.cache_policy == "hit":
-                existing = layer.search(query)
-                if existing:
-                    layer.write_cache(query, results, layer.ttl)
+        elif layer.cache_policy == "hit":
+            existing = layer.search(query)
+            if existing:
+                layer.write_cache(query, results, layer.ttl)
     
     def filter_by_popularity(self, records: List[DatabaseRecord], min_popularity: int = None) -> List[DatabaseRecord]:
         threshold = min_popularity if min_popularity is not None else self.config.min_popularity

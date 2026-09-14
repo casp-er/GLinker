@@ -339,6 +339,22 @@ class TestL0ComponentAliasMatching:
         assert matched.entity_id == "MLB"
         assert matched.label == "Major League Baseball"
 
+    def test_candidate_grouping_accepts_mentions_ending_in_punctuation(self, l0_component):
+        from glinker.l1.models import L1Entity
+        from glinker.l2.models import DatabaseRecord
+
+        mention = L1Entity(
+            text="U.S.", start=0, end=4, label="country",
+            left_context="", right_context="",
+        )
+        candidate = DatabaseRecord(
+            entity_id="Q30", label="United States of America", aliases=["U.S."]
+        )
+
+        assert l0_component._get_candidates_for_mention(0, mention, [candidate]) == [candidate]
+        longer_token = DatabaseRecord(entity_id="QX", label="U.S.A")
+        assert l0_component._get_candidates_for_mention(0, mention, [longer_token]) == []
+
     def test_match_candidate_by_label_with_alias_case_insensitive(self, l0_component):
         """Test that alias matching is case-insensitive."""
         from glinker.l2.models import DatabaseRecord

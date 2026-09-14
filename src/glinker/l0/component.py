@@ -219,7 +219,16 @@ class L0Component(BaseComponent[L0Config]):
         """
         matched_candidates = []
         mention_text_lower = l1_mention.text.lower().strip()
-        mention_re = re.compile(r"\b" + re.escape(mention_text_lower) + r"\b", re.IGNORECASE)
+        if not mention_text_lower:
+            return matched_candidates
+
+        # A word boundary only exists next to a word character. Applying
+        # ``\b`` unconditionally makes exact mentions ending in punctuation
+        # (for example ``U.S.`` or ``Apple Inc.``) impossible to match. Word
+        # lookarounds work for both alphanumeric and punctuation edges while
+        # still preventing the mention from matching inside a longer token.
+        pattern = r"(?<!\w)" + re.escape(mention_text_lower) + r"(?!\w)"
+        mention_re = re.compile(pattern, re.IGNORECASE)
 
         for candidate in all_candidates:
             if mention_re.search(candidate.label):

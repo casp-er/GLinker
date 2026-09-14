@@ -181,9 +181,13 @@ The batched-throughput number is nonetheless the one that matters for a
 real pipeline run: NER surfaces multiple mentions per article
 (`GLINKER_MAX_MENTIONS=15` in broadside-ml), and the pre-fix per-mention
 round-trip cost compounded linearly with mention count regardless of cache
-state. The warm-cache number is the one that matters for steady-state
-production traffic, where the same countries/public figures/organizations
-recur across articles.
+state. The Redis timing used a loopback connection inside the disposable
+test environment, so the 0.33 ms warm result is not a claim about latency
+over Tailscale or another deployment network. `RedisLayer.search_many` now
+pipelines all query-key reads and all unique embedding reads, and cache
+writeback pipelines the full result set, bounding network round trips for a
+request. Measure the real deployment route separately before setting its
+latency budget.
 
 ### Redis TTL and cache invalidation
 
@@ -231,7 +235,9 @@ including that one chunk's failure doesn't lose another chunk's results and
 that a mention whose exact-phase chunk failed is excluded from `search_many`'s
 fuzzy retry rather than re-issued against a connection that may have just
 timed out; `RedisLayer._cache_set`'s `ttl<=0` no-expiry contract (`SET` vs.
-`SETEX`); and the config builder's Postgres DSN/credential preservation and
-Redis password forwarding. Broadside-ML's own test suite and Compose
-configuration validation were not re-run for this docs/fix pass. No L3
-models were downloaded or inference run for this retrieval-only change.
+`SETEX`); batched Redis query, embedding, and writeback pipelines; overwrite
+invalidation of stale precomputed embeddings; and the config builder's
+Postgres DSN/credential preservation and Redis password forwarding. L0 and
+L3 regression tests cover punctuation-ending aliases and per-mention
+popularity normalization respectively. No L3 models were downloaded or
+inference run for these tests.

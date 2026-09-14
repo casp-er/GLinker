@@ -63,6 +63,9 @@ def test_normalization_description_alias_fuzzy_and_embeddings(pg):
     assert not pg.search("  ")
     pg.update_embeddings(["Q1"], [[1.0, 2.0]], "model")
     assert pg.search("Erdogan")[0].embedding == [1.0, 2.0]
+    record.description = "changed description"
+    pg.load_bulk([record], overwrite=True)
+    assert pg.search("Erdogan")[0].embedding is None
     record.aliases = []
     pg.load_bulk([record], overwrite=True)
     assert not pg.search("Erdogan")
