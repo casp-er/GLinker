@@ -1,0 +1,1457 @@
+[
+  {
+    "mention": "Erdogan",
+    "expected_id": "Q39259",
+    "category": "accent"
+  },
+  {
+    "mention": "Recep Tayyip Erdoğan",
+    "expected_id": "Q39259",
+    "category": "exact"
+  },
+  {
+    "mention": "Beyonce",
+    "expected_id": "Q36153",
+    "category": "accent"
+  },
+  {
+    "mention": "Beyoncé",
+    "expected_id": "Q36153",
+    "category": "exact"
+  },
+  {
+    "mention": "Sao Paulo",
+    "expected_id": "Q174",
+    "category": "accent"
+  },
+  {
+    "mention": "São Paulo",
+    "expected_id": "Q174",
+    "category": "exact"
+  },
+  {
+    "mention": "Munich",
+    "expected_id": "Q1726",
+    "category": "alias"
+  },
+  {
+    "mention": "München",
+    "expected_id": "Q1726",
+    "category": "unicode"
+  },
+  {
+    "mention": "NATO",
+    "expected_id": "Q7184",
+    "category": "acronym"
+  },
+  {
+    "mention": "UN",
+    "expected_id": "Q1065",
+    "category": "short"
+  },
+  {
+    "mention": "United Nations",
+    "expected_id": "Q1065",
+    "category": "exact"
+  },
+  {
+    "mention": "Joe Biden",
+    "expected_id": "Q6279",
+    "category": "exact"
+  },
+  {
+    "mention": "Biden",
+    "expected_id": "Q6279",
+    "category": "partial"
+  },
+  {
+    "mention": "Donald Trump",
+    "expected_id": "Q22686",
+    "category": "exact"
+  },
+  {
+    "mention": "Barack Obma",
+    "expected_id": "Q76",
+    "category": "typo"
+  },
+  {
+    "mention": "Barack Obama",
+    "expected_id": "Q76",
+    "category": "exact"
+  },
+  {
+    "mention": "Emmanuel Macrn",
+    "expected_id": "Q3052772",
+    "category": "typo"
+  },
+  {
+    "mention": "Emmanuel Macron",
+    "expected_id": "Q3052772",
+    "category": "exact"
+  },
+  {
+    "mention": "Kyiv",
+    "expected_id": "Q1899",
+    "category": "alias"
+  },
+  {
+    "mention": "Kiev",
+    "expected_id": "Q1899",
+    "category": "alias"
+  },
+  {
+    "mention": "Türkiye",
+    "expected_id": "Q43",
+    "category": "unicode"
+  },
+  {
+    "mention": "Turkey",
+    "expected_id": "Q43",
+    "category": "ambiguous"
+  },
+  {
+    "mention": "Apple",
+    "expected_id": "Q312",
+    "category": "ambiguous"
+  },
+  {
+    "mention": "Amazon",
+    "expected_id": "Q3884",
+    "category": "ambiguous"
+  },
+  {
+    "mention": "Paris",
+    "expected_id": "Q90",
+    "category": "ambiguous"
+  },
+  {
+    "mention": "Georgia",
+    "expected_id": "Q230",
+    "category": "ambiguous"
+  },
+  {
+    "mention": "Ｊａｐａｎ",
+    "expected_id": "Q17",
+    "category": "width"
+  },
+  {
+    "mention": "Japan",
+    "expected_id": "Q17",
+    "category": "exact"
+  },
+  {
+    "mention": "Vladimir Putin",
+    "expected_id": "Q7747",
+    "category": "exact"
+  },
+  {
+    "mention": "Volodymyr Zelenskyy",
+    "expected_id": "Q3874799",
+    "category": "exact"
+  },
+  {
+    "mention": "North Atlantic Treaty Organization",
+    "expected_id": "Q7184",
+    "category": "alias"
+  },
+  {
+    "mention": "most populous city in France",
+    "expected_id": "Q90",
+    "category": "description"
+  },
+  {
+    "mention": "island country in East Asia",
+    "expected_id": "Q17",
+    "category": "description"
+  },
+  {
+    "mention": "intergovernmental military alliance",
+    "expected_id": "Q7184",
+    "category": "description"
+  },
+  {
+    "mention": "Belmont Swansea Utd",
+    "expected_id": "Q17985833",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Belmont Sansea Utd",
+    "expected_id": "Q17985833",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Belmont Swansea United Football Club",
+    "expected_id": "Q17985833",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "It Happened in Boston?",
+    "expected_id": "Q16935564",
+    "category": "sample_label"
+  },
+  {
+    "mention": "It Happenedin Boston?",
+    "expected_id": "Q16935564",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "NGC 548",
+    "expected_id": "Q1037277",
+    "category": "sample_label"
+  },
+  {
+    "mention": "NGC548",
+    "expected_id": "Q1037277",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "PGC 5326",
+    "expected_id": "Q1037277",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "The Search for Ancient Egypt",
+    "expected_id": "Q48474417",
+    "category": "sample_label"
+  },
+  {
+    "mention": "The Search forAncient Egypt",
+    "expected_id": "Q48474417",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "À la recherche de l'Égypte oubliée",
+    "expected_id": "Q48474417",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Six Ft Hick",
+    "expected_id": "Q7532746",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Six F Hick",
+    "expected_id": "Q7532746",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Fred Noonan",
+    "expected_id": "Q7532746",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Jay Gonzalez",
+    "expected_id": "Q6166654",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Jay Gozalez",
+    "expected_id": "Q6166654",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Saint Bernard's High School",
+    "expected_id": "Q7401050",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Saint Bernards High School",
+    "expected_id": "Q7401050",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Viviana Mall",
+    "expected_id": "Q55637189",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Vivian Mall",
+    "expected_id": "Q55637189",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Deliverance",
+    "expected_id": "Q5254054",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Delivrance",
+    "expected_id": "Q5254054",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "American Fancy",
+    "expected_id": "Q4743736",
+    "category": "sample_label"
+  },
+  {
+    "mention": "America Fancy",
+    "expected_id": "Q4743736",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Dekaton",
+    "expected_id": "Q65050964",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Dekton",
+    "expected_id": "Q65050964",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Hontoon Island State Park",
+    "expected_id": "Q5897280",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Hontoon Islad State Park",
+    "expected_id": "Q5897280",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Hontoon Island",
+    "expected_id": "Q5897280",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "No Disco",
+    "expected_id": "Q7044111",
+    "category": "sample_label"
+  },
+  {
+    "mention": "No Dsco",
+    "expected_id": "Q7044111",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Williamsburgh",
+    "expected_id": "Q65045701",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Williasburgh",
+    "expected_id": "Q65045701",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Williamsburgh, North Carolina",
+    "expected_id": "Q65045701",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Li Guangbi",
+    "expected_id": "Q697728",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Li Gungbi",
+    "expected_id": "Q697728",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Stress: The Extinction Agenda",
+    "expected_id": "Q7623422",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Stress: The Exinction Agenda",
+    "expected_id": "Q7623422",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "The extinction agenda",
+    "expected_id": "Q7623422",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Tiny Animals",
+    "expected_id": "Q7808572",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Tiny Aimals",
+    "expected_id": "Q7808572",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Third Polish Republic",
+    "expected_id": "Q1259201",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Third Polih Republic",
+    "expected_id": "Q1259201",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "3rd Polish Republic",
+    "expected_id": "Q1259201",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Jim Padgett",
+    "expected_id": "Q6197328",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Jim Pdgett",
+    "expected_id": "Q6197328",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "James L. Padgett",
+    "expected_id": "Q6197328",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Tymbal",
+    "expected_id": "Q7860352",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Tymal",
+    "expected_id": "Q7860352",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Timbal",
+    "expected_id": "Q7860352",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Brighton Beach Memoirs",
+    "expected_id": "Q17512010",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Brighton Bech Memoirs",
+    "expected_id": "Q17512010",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Kenneth Haworth",
+    "expected_id": "Q6390195",
+    "category": "sample_label"
+  },
+  {
+    "mention": "KennethHaworth",
+    "expected_id": "Q6390195",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Kenneth William Haworth",
+    "expected_id": "Q6390195",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "1920 Stanley Cup Finals",
+    "expected_id": "Q16986795",
+    "category": "sample_label"
+  },
+  {
+    "mention": "1920 Stanle Cup Finals",
+    "expected_id": "Q16986795",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "1920 Stanley Cup",
+    "expected_id": "Q16986795",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Nicolai Michoutouchkine",
+    "expected_id": "Q4298537",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Nicolai Micoutouchkine",
+    "expected_id": "Q4298537",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Zambia women's national rugby union team",
+    "expected_id": "Q3873945",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Zambia women's natioal rugby union team",
+    "expected_id": "Q3873945",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Robert Ramsay Wright",
+    "expected_id": "Q7349157",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Robert Ramay Wright",
+    "expected_id": "Q7349157",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "R. Ramsay Wright",
+    "expected_id": "Q7349157",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Bidyut Marg",
+    "expected_id": "Q16999760",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Bidyu Marg",
+    "expected_id": "Q16999760",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Anne-Sophie Le Paranthoën",
+    "expected_id": "Q2850935",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Anne-Sophie e Paranthoën",
+    "expected_id": "Q2850935",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Anne Sophie Le Paranthoen",
+    "expected_id": "Q2850935",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Holly Lodge Girls' College",
+    "expected_id": "Q18160594",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Holly Lodge Grls' College",
+    "expected_id": "Q18160594",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Holly Lodge Girls College",
+    "expected_id": "Q18160594",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Henry Guard Knaggs",
+    "expected_id": "Q17626918",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Henry Guad Knaggs",
+    "expected_id": "Q17626918",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "H. G. Knaggs",
+    "expected_id": "Q17626918",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Great Gable",
+    "expected_id": "Q1502223",
+    "category": "sample_label"
+  },
+  {
+    "mention": "GreatGable",
+    "expected_id": "Q1502223",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Napes Needle",
+    "expected_id": "Q1502223",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "The Old King's Head",
+    "expected_id": "Q26315283",
+    "category": "sample_label"
+  },
+  {
+    "mention": "The Old Kng's Head",
+    "expected_id": "Q26315283",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Säckingen Abbey",
+    "expected_id": "Q7665764",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Säckingn Abbey",
+    "expected_id": "Q7665764",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Sackingen Abbey",
+    "expected_id": "Q7665764",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Daniel Boone National Forest",
+    "expected_id": "Q1160129",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Daniel Boone Ntional Forest",
+    "expected_id": "Q1160129",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Cumberland National Forest",
+    "expected_id": "Q1160129",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "PPP2R2C",
+    "expected_id": "Q18030722",
+    "category": "sample_label"
+  },
+  {
+    "mention": "PPPR2C",
+    "expected_id": "Q18030722",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "B55-GAMMA",
+    "expected_id": "Q18030722",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Template:Taxonomy/Aerococcaceae",
+    "expected_id": "Q51176816",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Template:Taxonoy/Aerococcaceae",
+    "expected_id": "Q51176816",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Paulo Trindade",
+    "expected_id": "Q28970571",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Paulo Tindade",
+    "expected_id": "Q28970571",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Paulo Manuel Trindade",
+    "expected_id": "Q28970571",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Sir George Clark, 2nd Baronet",
+    "expected_id": "Q7526856",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Sir George Clak, 2nd Baronet",
+    "expected_id": "Q7526856",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Sir George Ernest Clark, 2nd Bt.",
+    "expected_id": "Q7526856",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "FSK Satellite",
+    "expected_id": "Q80569080",
+    "category": "sample_label"
+  },
+  {
+    "mention": "FSK Saellite",
+    "expected_id": "Q80569080",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Lichte",
+    "expected_id": "Q320151",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Licte",
+    "expected_id": "Q320151",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Lichte (Fluss)",
+    "expected_id": "Q320151",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Santa Maria della Verità",
+    "expected_id": "Q36512748",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Santa Maria ella Verità",
+    "expected_id": "Q36512748",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Santa Maria dei Servi, Viterbo",
+    "expected_id": "Q36512748",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Einstein aether theory",
+    "expected_id": "Q5349796",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Einstein aeher theory",
+    "expected_id": "Q5349796",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Claude Feemster Clayton",
+    "expected_id": "Q5128827",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Claude Feemter Clayton",
+    "expected_id": "Q5128827",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Claude Clayton",
+    "expected_id": "Q5128827",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Epping Forest Act 1878",
+    "expected_id": "Q47005850",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Epping Foret Act 1878",
+    "expected_id": "Q47005850",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Hong-Chih Kuo",
+    "expected_id": "Q707802",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Hong-Cih Kuo",
+    "expected_id": "Q707802",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Hong Chih Kuo",
+    "expected_id": "Q707802",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Curse of Simba",
+    "expected_id": "Q5195263",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Curse o Simba",
+    "expected_id": "Q5195263",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Curse of the Voodoo",
+    "expected_id": "Q5195263",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Pinjarra Hills",
+    "expected_id": "Q7195922",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Pinjarr Hills",
+    "expected_id": "Q7195922",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Pinjarra Hills, Queensland",
+    "expected_id": "Q7195922",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Lobelia leucotos",
+    "expected_id": "Q15604324",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Lobelia eucotos",
+    "expected_id": "Q15604324",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Augusta State Medical Prison",
+    "expected_id": "Q4820968",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Augusta State edical Prison",
+    "expected_id": "Q4820968",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Xavier Koenig",
+    "expected_id": "Q51457534",
+    "category": "sample_label"
+  },
+  {
+    "mention": "XavierKoenig",
+    "expected_id": "Q51457534",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Ahvarak",
+    "expected_id": "Q4696430",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Ahvrak",
+    "expected_id": "Q4696430",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Ahurak",
+    "expected_id": "Q4696430",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Berlin Jannowitzbrücke station",
+    "expected_id": "Q1647893",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Berlin Jannowitbrücke station",
+    "expected_id": "Q1647893",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Berlin Jannowitzbrucke station",
+    "expected_id": "Q1647893",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Witham St Hughs",
+    "expected_id": "Q8028116",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Witham t Hughs",
+    "expected_id": "Q8028116",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Witham St Hughs, Lincolnshire",
+    "expected_id": "Q8028116",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "František Hrabě",
+    "expected_id": "Q5492526",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Františk Hrabě",
+    "expected_id": "Q5492526",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Frantisek Hrabe",
+    "expected_id": "Q5492526",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "George Nicholl",
+    "expected_id": "Q5542878",
+    "category": "sample_label"
+  },
+  {
+    "mention": "George icholl",
+    "expected_id": "Q5542878",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "George Frederick Nicholl",
+    "expected_id": "Q5542878",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "The Bible Story",
+    "expected_id": "Q1537038",
+    "category": "sample_label"
+  },
+  {
+    "mention": "The Bibe Story",
+    "expected_id": "Q1537038",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "August 29, 2004",
+    "expected_id": "Q69305696",
+    "category": "sample_label"
+  },
+  {
+    "mention": "August 9, 2004",
+    "expected_id": "Q69305696",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "2004-08-29",
+    "expected_id": "Q69305696",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "On Springfield Mountain",
+    "expected_id": "Q7091138",
+    "category": "sample_label"
+  },
+  {
+    "mention": "On Springfild Mountain",
+    "expected_id": "Q7091138",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "On Springfield Mountain (song)",
+    "expected_id": "Q7091138",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Teiichi Yoshimoto",
+    "expected_id": "Q11413208",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Teiichi oshimoto",
+    "expected_id": "Q11413208",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Aleksandr Ivanov",
+    "expected_id": "Q9146316",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Aleksand Ivanov",
+    "expected_id": "Q9146316",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Aleksandr Ivanov (racewalker)",
+    "expected_id": "Q9146316",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Azeniina",
+    "expected_id": "Q21360853",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Azenina",
+    "expected_id": "Q21360853",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Hypercompe marcescens",
+    "expected_id": "Q13310720",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Hypercompemarcescens",
+    "expected_id": "Q13310720",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Agaposoma marcescens",
+    "expected_id": "Q13310720",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Raid on Dalola",
+    "expected_id": "Q5211581",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Raid onDalola",
+    "expected_id": "Q5211581",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Dalola raid",
+    "expected_id": "Q5211581",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Robert \"Fuzz\" Townshend",
+    "expected_id": "Q7341165",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Robert \"Fuz\" Townshend",
+    "expected_id": "Q7341165",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Robert Fuzz Townshend",
+    "expected_id": "Q7341165",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Hastatis simplicis",
+    "expected_id": "Q14831927",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Hastatis implicis",
+    "expected_id": "Q14831927",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "1718 in Scotland",
+    "expected_id": "Q21997300",
+    "category": "sample_label"
+  },
+  {
+    "mention": "1718 in cotland",
+    "expected_id": "Q21997300",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Adalberto Manuel Silva Ribeiro",
+    "expected_id": "Q3604948",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Adalberto Manue Silva Ribeiro",
+    "expected_id": "Q3604948",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Scythris cuneatella",
+    "expected_id": "Q14325579",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Scythris uneatella",
+    "expected_id": "Q14325579",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Raohe County",
+    "expected_id": "Q478700",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Raohe ounty",
+    "expected_id": "Q478700",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Pride and Prejudice and Zombies",
+    "expected_id": "Q18154994",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Pride and Prejuice and Zombies",
+    "expected_id": "Q18154994",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Pride & Prejudice and Zombies",
+    "expected_id": "Q18154994",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Nunasoko Nakatsu-hime",
+    "expected_id": "Q11561868",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Nunasoko Nkatsu-hime",
+    "expected_id": "Q11561868",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Nunasokonakatsu-hime",
+    "expected_id": "Q11561868",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Jorge Elich",
+    "expected_id": "Q5849005",
+    "category": "sample_label"
+  },
+  {
+    "mention": "JorgeElich",
+    "expected_id": "Q5849005",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Acre River",
+    "expected_id": "Q73584",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Acre iver",
+    "expected_id": "Q73584",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Acre",
+    "expected_id": "Q73584",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Saint Helena National Trust",
+    "expected_id": "Q3967636",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Saint Helena ational Trust",
+    "expected_id": "Q3967636",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Saint Helena Heritage Society",
+    "expected_id": "Q3967636",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Pomona",
+    "expected_id": "Q923222",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Pomna",
+    "expected_id": "Q923222",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Pomona, MO",
+    "expected_id": "Q923222",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "2014 All-Ireland Minor Football Championship",
+    "expected_id": "Q17513110",
+    "category": "sample_label"
+  },
+  {
+    "mention": "2014 All-Ireland MinorFootball Championship",
+    "expected_id": "Q17513110",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Janina San Miguel",
+    "expected_id": "Q6154520",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Janina Sn Miguel",
+    "expected_id": "Q6154520",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Janina Miller San Miguel",
+    "expected_id": "Q6154520",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Ukrainian parliamentary inquiry into the Battle of Ilovaisk",
+    "expected_id": "Q18356135",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Ukrainian parliamentary inquiy into the Battle of Ilovaisk",
+    "expected_id": "Q18356135",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Parliamentary provisional investigatory commission on investigation of circumstances of the Ilovaisk tragedy",
+    "expected_id": "Q18356135",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Horní Věstonice",
+    "expected_id": "Q1023884",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Horní Vstonice",
+    "expected_id": "Q1023884",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Horni Vestonice",
+    "expected_id": "Q1023884",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Dusty Fact",
+    "expected_id": "Q4385267",
+    "category": "sample_label"
+  },
+  {
+    "mention": "DustyFact",
+    "expected_id": "Q4385267",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Daniel Murray",
+    "expected_id": "Q30122554",
+    "category": "sample_label"
+  },
+  {
+    "mention": "DanielMurray",
+    "expected_id": "Q30122554",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Creative Works Records",
+    "expected_id": "Q1139362",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Creative Woks Records",
+    "expected_id": "Q1139362",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Paudalho",
+    "expected_id": "Q674432",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Paudlho",
+    "expected_id": "Q674432",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Template:1909 in Asian football (AFC)",
+    "expected_id": "Q20323634",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Template:1909 in Aian football (AFC)",
+    "expected_id": "Q20323634",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Aroga eldorada",
+    "expected_id": "Q20817710",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Aroga edorada",
+    "expected_id": "Q20817710",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Aroga eldorado",
+    "expected_id": "Q20817710",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Tanglewood Tree",
+    "expected_id": "Q7683050",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Tanglewod Tree",
+    "expected_id": "Q7683050",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "2010–11 Real Madrid Baloncesto season",
+    "expected_id": "Q6655039",
+    "category": "sample_label"
+  },
+  {
+    "mention": "2010–11 Real Madri Baloncesto season",
+    "expected_id": "Q6655039",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "2010-11 Real Madrid Baloncesto season",
+    "expected_id": "Q6655039",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Harry Price",
+    "expected_id": "Q5671712",
+    "category": "sample_label"
+  },
+  {
+    "mention": "HarryPrice",
+    "expected_id": "Q5671712",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Bill Smith",
+    "expected_id": "Q4910919",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Bill mith",
+    "expected_id": "Q4910919",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "William Albert Smith",
+    "expected_id": "Q4910919",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Fernando Silva dos Santos",
+    "expected_id": "Q15831011",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Fernando Sila dos Santos",
+    "expected_id": "Q15831011",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "1977–78 FIBA Korać Cup",
+    "expected_id": "Q3691723",
+    "category": "sample_label"
+  },
+  {
+    "mention": "1977–78 FIB Korać Cup",
+    "expected_id": "Q3691723",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "1977-78 FIBA Korac Cup",
+    "expected_id": "Q3691723",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Johannes Nikolaus Tetens",
+    "expected_id": "Q63081",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Johannes Niklaus Tetens",
+    "expected_id": "Q63081",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "J. N. Tetens",
+    "expected_id": "Q63081",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Agrotis mesotoxa",
+    "expected_id": "Q4694361",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Agrotis esotoxa",
+    "expected_id": "Q4694361",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Benjamin Etter",
+    "expected_id": "Q27958306",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Benjami Etter",
+    "expected_id": "Q27958306",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Etter, Benjamin",
+    "expected_id": "Q27958306",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Tsutomu Nishino",
+    "expected_id": "Q1185650",
+    "category": "sample_label"
+  },
+  {
+    "mention": "TsutomuNishino",
+    "expected_id": "Q1185650",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Hungarian Folk Tales",
+    "expected_id": "Q738186",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Hungarian olk Tales",
+    "expected_id": "Q738186",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Hungarian Folktales",
+    "expected_id": "Q738186",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "t-structure",
+    "expected_id": "Q21071553",
+    "category": "sample_label"
+  },
+  {
+    "mention": "t-strcture",
+    "expected_id": "Q21071553",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Heart",
+    "expected_id": "Q21071553",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Atlantochelys mortoni",
+    "expected_id": "Q2869423",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Atlantocheys mortoni",
+    "expected_id": "Q2869423",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Randall Plunkett, 15th Baron of Dunsany",
+    "expected_id": "Q25991570",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Randall Plunkett, 1th Baron of Dunsany",
+    "expected_id": "Q25991570",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Randal Plunket",
+    "expected_id": "Q25991570",
+    "category": "sample_alias"
+  },
+  {
+    "mention": "Haidar Abdul-Razzaq",
+    "expected_id": "Q1569060",
+    "category": "sample_label"
+  },
+  {
+    "mention": "Haidar Abul-Razzaq",
+    "expected_id": "Q1569060",
+    "category": "sample_deletion"
+  },
+  {
+    "mention": "Abdul-Razzaq, Haidar",
+    "expected_id": "Q1569060",
+    "category": "sample_alias"
+  }
+]

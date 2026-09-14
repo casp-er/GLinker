@@ -190,13 +190,19 @@ class ConfigBuilder:
             elif layer_type == "postgres":
                 if fuzzy_similarity is None:
                     fuzzy_similarity = 0.3
-                layer["config"] = {
-                    "host": db_config.get("host", "localhost"),
-                    "port": db_config.get("port", 5432),
-                    "database": db_config.get("database", "entities_db"),
-                    "user": db_config.get("user", "postgres"),
-                    "password": db_config.get("password", "postgres")
-                }
+                if "dsn" in db_config:
+                    layer["config"] = {"dsn": db_config["dsn"]}
+                else:
+                    layer["config"] = {
+                        "host": db_config.get("host", "localhost"),
+                        "port": db_config.get("port", 5432),
+                        "database": db_config.get("database", "entities_db"),
+                        "user": db_config.get("user", "postgres"),
+                        "password": db_config.get("password", "postgres"),
+                    }
+                for option in ("schema", "connect_timeout", "statement_timeout_ms", "sslmode"):
+                    if option in db_config:
+                        layer["config"][option] = db_config[option]
                 layer["fuzzy"] = {"min_similarity": fuzzy_similarity}
 
             self.parent._l2_layers.append(layer)

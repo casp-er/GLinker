@@ -253,177 +253,299 @@ class DictLayer(DatabaseLayer):
 
 
 class RedisLayer(DatabaseLayer):
-    """Redis cache layer"""
-    
+    """Redis cache layer with optimized embedding storage.
+
+    Storage structure:
+    - entity:{label} -> entity data without embedding (fast lookup)
+    - entity:{alias} -> entity data without embedding (fast lookup)
+    - entity:emb:{entity_id} -> {embedding, embedding_model_id} (no duplication)
+
+    Benefits:
+    - Embeddings stored once per entity (not duplicated across aliases)
+    - update_embeddings() is O(M) instead of O(N×M) where:
+      - M = entities to update
+      - N = total keys in Redis (entities × aliases)
+    - Reduced memory usage for large entity databases
+    - Faster batch embedding updates
+    """
+
     def _setup(self):
         self.client = redis.Redis(
-            host=self.config.config.get('host', 'localhost'),
-            port=self.config.config.get('port', 6379),
-            db=self.config.config.get('db', 0),
-            password=self.config.config.get('password'),
-            decode_responses=False
+            host=self.config.config.get("host", "localhost"),
+            port=self.config.config.get("port", 6379),
+            db=self.config.config.get("db", 0),
+            password=self.config.config.get("password"),
+            decode_responses=False,
         )
-    
+
     def supports_fuzzy(self) -> bool:
         return False
-    
-    def search(self, query: str) -> List[DatabaseRecord]:
+
+    def _search_records(self, query: str) -> List[DatabaseRecord]:
         query = self.normalize_query(query)
         key = f"entity:{query}"
-        
+
         try:
             data = self.client.get(key)
             if data:
                 if isinstance(data, bytes):
-                    data = data.decode('utf-8')
-                
+                    data = data.decode("utf-8")
+
                 records_data = json.loads(data)
-                
+
                 if isinstance(records_data, list):
                     results = []
                     for r in records_data:
                         if isinstance(r, dict):
-                            r['source'] = 'redis'
+                            r["source"] = "redis"
                             results.append(DatabaseRecord(**r))
                         else:
                             results.append(r)
                     return results
-                
+
                 elif isinstance(records_data, dict):
-                    records_data['source'] = 'redis'
+                    records_data["source"] = "redis"
                     return [DatabaseRecord(**records_data)]
-        
+
         except Exception as e:
             print(f"[ERROR Redis] Search error: {e}")
-        
+
         return []
-    
+
+    def search(self, query: str) -> List[DatabaseRecord]:
+        records = self._search_records(query)
+        embeddings = self.get_embeddings_batch([r.entity_id for r in records])
+        for record in records:
+            if record.entity_id in embeddings:
+                data = embeddings[record.entity_id]
+                record.embedding = data.get("embedding")
+                record.embedding_model_id = data.get("embedding_model_id")
+        return records
+
     def search_fuzzy(self, query: str) -> List[DatabaseRecord]:
         return []
-    
+
     def write_cache(self, key: str, records: List[DatabaseRecord], ttl: int):
+        """Write search results to cache.
+
+        Optimized: embeddings stored separately to avoid duplication.
+        """
         key = self.normalize_query(key)
         cache_key = f"entity:{key}"
-        
+
         try:
-            data = json.dumps([r.dict() for r in records])
-            self.client.setex(cache_key, ttl, data)
+            # Store entity data WITHOUT embeddings
+            records_data = []
+            pipe = self.client.pipeline()
+
+            for r in records:
+                r_dict = r.dict()
+                embedding = r_dict.pop("embedding", None)
+                embedding_model_id = r_dict.pop("embedding_model_id", None)
+                records_data.append(r_dict)
+
+                # Store embedding separately if present
+                if embedding is not None:
+                    emb_key = f"entity:emb:{r.entity_id}"
+                    emb_data = json.dumps({
+                        "embedding": embedding,
+                        "embedding_model_id": embedding_model_id
+                    })
+                    pipe.setex(emb_key, ttl, emb_data)
+
+            # Store main cache data
+            data = json.dumps(records_data)
+            pipe.setex(cache_key, ttl, data)
+            pipe.execute()
+
         except Exception as e:
             print(f"[ERROR Redis] Write error: {e}")
-    
-    def load_bulk(self, entities: List[DatabaseRecord], overwrite: bool = False, batch_size: int = 1000) -> int:
-        """Bulk load to Redis"""
+
+    def load_bulk(
+        self, entities: List[DatabaseRecord], overwrite: bool = False, batch_size: int = 1000
+    ) -> int:
+        """Bulk load to Redis.
+
+        Optimized: embeddings stored separately to avoid duplication across aliases.
+        Structure:
+        - entity:{label/alias} -> entity data WITHOUT embedding
+        - entity:emb:{entity_id} -> {embedding, model_id}
+        """
         count = 0
         pipe = self.client.pipeline()
-        
+
         for entity in entities:
-            # Prepare data
+            # Prepare data WITHOUT embedding (store separately)
             entity_data = entity.dict()
+            embedding = entity_data.pop("embedding", None)
+            embedding_model_id = entity_data.pop("embedding_model_id", None)
             data_json = json.dumps(entity_data)
-            
+
             # Store by label
             label_key = f"entity:{entity.label.lower()}"
             if overwrite or not self.client.exists(label_key):
                 pipe.setex(label_key, self.ttl, data_json)
                 count += 1
-            
+
             # Store by aliases
             for alias in entity.aliases:
                 alias_key = f"entity:{alias.lower()}"
                 if overwrite or not self.client.exists(alias_key):
                     pipe.setex(alias_key, self.ttl, data_json)
-            
+
+            # Store embedding SEPARATELY (no duplication)
+            if embedding is not None:
+                emb_key = f"entity:emb:{entity.entity_id}"
+                emb_data = json.dumps({
+                    "embedding": embedding,
+                    "embedding_model_id": embedding_model_id
+                })
+                pipe.setex(emb_key, self.ttl, emb_data)
+
             # Execute in batches
             if len(pipe) >= batch_size:
                 pipe.execute()
                 pipe = self.client.pipeline()
-        
+
         # Execute remaining
         if len(pipe) > 0:
             pipe.execute()
-        
+
         return count
-    
+
     def clear(self):
-        """Clear all entity keys"""
+        """Clear all entity keys (including embeddings)."""
         for key in self.client.scan_iter(match="entity:*"):
             self.client.delete(key)
-    
+        # Note: entity:emb:* keys are also matched by entity:* pattern
+
     def count(self) -> int:
-        """Count entity keys"""
+        """Count entity keys."""
         return sum(1 for _ in self.client.scan_iter(match="entity:*"))
 
-    def get_all_entities(self) -> List[DatabaseRecord]:
-        """Get all entities from Redis (scans all entity:* keys)"""
+    def get_all_entities(self, include_embeddings: bool = False) -> List[DatabaseRecord]:
+        """Get all entities from Redis (scans all entity:* keys).
+
+        Args:
+            include_embeddings: If True, also fetch embeddings (slower)
+
+        Note: Skips entity:emb:* keys as they're fetched separately if needed.
+        """
         entities = []
         seen_ids = set()
 
         for key in self.client.scan_iter(match="entity:*"):
+            # Skip embedding keys - they're handled separately
+            if isinstance(key, bytes):
+                key_str = key.decode("utf-8")
+            else:
+                key_str = key
+
+            if key_str.startswith("entity:emb:"):
+                continue
+
             try:
                 data = self.client.get(key)
                 if data:
                     if isinstance(data, bytes):
-                        data = data.decode('utf-8')
+                        data = data.decode("utf-8")
                     record_data = json.loads(data)
 
                     if isinstance(record_data, dict):
-                        if record_data.get('entity_id') not in seen_ids:
-                            record_data['source'] = 'redis'
+                        if record_data.get("entity_id") not in seen_ids:
+                            record_data["source"] = "redis"
                             entities.append(DatabaseRecord(**record_data))
-                            seen_ids.add(record_data.get('entity_id'))
+                            seen_ids.add(record_data.get("entity_id"))
                     elif isinstance(record_data, list):
                         for r in record_data:
-                            if r.get('entity_id') not in seen_ids:
-                                r['source'] = 'redis'
+                            if r.get("entity_id") not in seen_ids:
+                                r["source"] = "redis"
                                 entities.append(DatabaseRecord(**r))
-                                seen_ids.add(r.get('entity_id'))
-            except Exception as e:
+                                seen_ids.add(r.get("entity_id"))
+            except Exception:
                 continue
+
+        # Optionally fetch embeddings in batch
+        if include_embeddings and entities:
+            entity_ids = [e.entity_id for e in entities]
+            embeddings_map = self.get_embeddings_batch(entity_ids)
+
+            for entity in entities:
+                if entity.entity_id in embeddings_map:
+                    emb_data = embeddings_map[entity.entity_id]
+                    entity.embedding = emb_data.get("embedding")
+                    entity.embedding_model_id = emb_data.get("embedding_model_id")
 
         return entities
 
     def update_embeddings(
-        self,
-        entity_ids: List[str],
-        embeddings: List[List[float]],
-        model_id: str
+        self, entity_ids: List[str], embeddings: List[List[float]], model_id: str
     ) -> int:
-        """Update embeddings in Redis entities"""
+        """Update embeddings in Redis entities.
+
+        Optimized: O(M) direct access instead of O(N×M) full scan.
+        Embeddings stored separately at entity:emb:{entity_id}.
+        """
+        if not entity_ids or not embeddings:
+            return 0
+
+        pipe = self.client.pipeline()
         count = 0
-        id_to_embedding = dict(zip(entity_ids, embeddings))
 
-        for key in self.client.scan_iter(match="entity:*"):
-            try:
-                data = self.client.get(key)
-                if not data:
-                    continue
+        for entity_id, embedding in zip(entity_ids, embeddings):
+            emb_key = f"entity:emb:{entity_id}"
+            emb_data = json.dumps({
+                "embedding": embedding,
+                "embedding_model_id": model_id
+            })
+            pipe.setex(emb_key, self.ttl, emb_data)
+            count += 1
 
-                if isinstance(data, bytes):
-                    data = data.decode('utf-8')
+            # Execute in batches of 1000
+            if count % 1000 == 0:
+                pipe.execute()
+                pipe = self.client.pipeline()
 
-                record_data = json.loads(data)
-                updated = False
-
-                if isinstance(record_data, dict):
-                    if record_data.get('entity_id') in id_to_embedding:
-                        record_data['embedding'] = id_to_embedding[record_data['entity_id']]
-                        record_data['embedding_model_id'] = model_id
-                        updated = True
-                elif isinstance(record_data, list):
-                    for r in record_data:
-                        if r.get('entity_id') in id_to_embedding:
-                            r['embedding'] = id_to_embedding[r['entity_id']]
-                            r['embedding_model_id'] = model_id
-                            updated = True
-
-                if updated:
-                    self.client.setex(key, self.ttl, json.dumps(record_data))
-                    count += 1
-
-            except Exception as e:
-                continue
+        # Execute remaining
+        if len(pipe) > 0:
+            pipe.execute()
 
         return count
+
+    def get_embeddings_batch(self, entity_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Get embeddings for multiple entities in batch.
+
+        Args:
+            entity_ids: List of entity IDs
+
+        Returns:
+            Dict mapping entity_id -> {embedding: List[float], embedding_model_id: str}
+            Missing entities are omitted from result.
+        """
+        if not entity_ids:
+            return {}
+
+        # Batch GET using pipeline
+        pipe = self.client.pipeline()
+        for entity_id in entity_ids:
+            emb_key = f"entity:emb:{entity_id}"
+            pipe.get(emb_key)
+
+        results = pipe.execute()
+
+        # Parse results
+        embeddings_map = {}
+        for entity_id, data in zip(entity_ids, results):
+            if data:
+                try:
+                    if isinstance(data, bytes):
+                        data = data.decode("utf-8")
+                    emb_data = json.loads(data)
+                    embeddings_map[entity_id] = emb_data
+                except Exception:
+                    continue
+
+        return embeddings_map
 
     def is_available(self) -> bool:
         try:
@@ -585,6 +707,11 @@ class ElasticsearchLayer(DatabaseLayer):
             print(f"[ERROR ES] Fuzzy error: {e}")
             return []
     
+    def batch_search(self, queries: List[str], fuzzy: bool = False) -> List[List[DatabaseRecord]]:
+        """Upstream-compatible explicit-mode batch API (no fallback)."""
+        normalized = [self.normalize_query(q) for q in queries]
+        return self._msearch([(q, fuzzy) for q in normalized])
+
     def _process_hits(self, hits: List[Dict]) -> List[DatabaseRecord]:
         records = []
         for hit in hits:
@@ -752,91 +879,100 @@ class PostgresLayer(DatabaseLayer):
     """PostgreSQL database layer"""
     
     def _setup(self):
-        self.conn = psycopg2.connect(
-            host=self.config.config['host'],
-            port=self.config.config.get('port', 5432),
-            database=self.config.config['database'],
-            user=self.config.config['user'],
-            password=self.config.config['password']
-        )
-        
-        cursor = self.conn.cursor()
-        try:
-            cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
-            self.conn.commit()
-        except Exception as e:
-            print(f"[WARN Postgres] pg_trgm: {e}")
-        finally:
-            cursor.close()
-    
+        from psycopg2 import sql
+
+        cfg = self.config.config
+        if not cfg.get("dsn") and not cfg.get("database"):
+            raise ValueError("PostgresLayer requires an explicit dsn or database")
+        self.conn = psycopg2.connect(cfg.get("dsn", ""), **{
+            key: value for key, value in cfg.items()
+            if key in {"host", "port", "database", "user", "password", "sslmode", "connect_timeout"}
+        })
+        self.schema = cfg.get("schema", "glinker")
+        self.statement_timeout_ms = int(cfg.get("statement_timeout_ms", 5000))
+        # No DDL on connection. Provision explicitly with scripts/init_postgres.py.
+        with self.conn:
+            with self.conn.cursor() as cursor:
+                cursor.execute(sql.SQL("SET search_path TO {}, public").format(sql.Identifier(self.schema)))
+                for name in ("entities", "aliases"):
+                    cursor.execute("SELECT to_regclass(%s)",
+                                   (sql.Identifier(self.schema, name).as_string(self.conn),))
+                    if cursor.fetchone()[0] is None:
+                        raise ValueError(f"GLiNKER schema {self.schema!r} is not provisioned")
+
+    def normalize_query(self, query: str) -> str:
+        # The database function is shared by ingestion triggers and queries.
+        with self.conn:
+            with self.conn.cursor() as cursor:
+                cursor.execute("SELECT glinker_fold(%s)", (query,))
+                return cursor.fetchone()[0]
+
     def search(self, query: str) -> List[DatabaseRecord]:
-        query = self.normalize_query(query)
-        
-        try:
-            cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-            sql = """
-                SELECT 
-                    e.entity_id,
-                    e.label,
-                    e.description,
-                    e.entity_type,
-                    e.popularity,
-                    COALESCE(array_agg(a.alias) FILTER (WHERE a.alias IS NOT NULL), ARRAY[]::text[]) as aliases
-                FROM entities e
-                LEFT JOIN aliases a ON e.entity_id = a.entity_id
-                WHERE LOWER(e.label) LIKE %s
-                   OR EXISTS (
-                       SELECT 1 FROM aliases a2 
-                       WHERE a2.entity_id = e.entity_id 
-                       AND LOWER(a2.alias) LIKE %s
-                   )
-                GROUP BY e.entity_id, e.label, e.description, e.entity_type, e.popularity
-                ORDER BY e.popularity DESC
-                LIMIT 50
-            """
-            cursor.execute(sql, (f"%{query}%", f"%{query}%"))
-            records = self._process_rows(cursor.fetchall())
-            cursor.close()
-            return records
-        except Exception as e:
-            print(f"[ERROR Postgres] Search error: {e}")
-            return []
-    
+        return self._retrieve(query, fuzzy=False)
+
     def search_fuzzy(self, query: str) -> List[DatabaseRecord]:
+        return self._retrieve(query, fuzzy=True)
+
+    def _retrieve(self, query: str, fuzzy: bool) -> List[DatabaseRecord]:
         query = self.normalize_query(query)
-        threshold = self.fuzzy_config.min_similarity
-        
-        try:
-            cursor = self.conn.cursor(cursor_factory=RealDictCursor)
-            sql = """
-                SELECT 
-                    e.entity_id,
-                    e.label,
-                    e.description,
-                    e.entity_type,
-                    e.popularity,
-                    COALESCE(array_agg(a.alias) FILTER (WHERE a.alias IS NOT NULL), ARRAY[]::text[]) as aliases,
-                    similarity(LOWER(e.label), %s) AS sim_score
-                FROM entities e
-                LEFT JOIN aliases a ON e.entity_id = a.entity_id
-                WHERE similarity(LOWER(e.label), %s) >= %s
-                GROUP BY e.entity_id, e.label, e.description, e.entity_type, e.popularity
-                ORDER BY sim_score DESC, e.popularity DESC
-                LIMIT 50
-            """
-            cursor.execute(sql, (query, query, threshold))
-            records = self._process_rows(cursor.fetchall())
-            cursor.close()
-            return records
-        except Exception as e:
-            print(f"[ERROR Postgres] Fuzzy error: {e}")
-            return self.search(query)
-    
+        if not query:
+            return []
+        # Separate indexed branches prevent an OR across the alias join from
+        # turning candidate discovery into a full entity-table scan.
+        if fuzzy:
+            predicate = (
+                "{field} %% %(query)s AND length({field}) <= 255 "
+                "AND length(%(query)s) <= 255 "
+                "AND abs(length({field}) - length(%(query)s)) <= %(distance)s "
+                "AND levenshtein_less_equal(left({field}, 255), left(%(query)s, 255), "
+                "%(distance)s) <= %(distance)s"
+            )
+            score = "similarity({field}, %(query)s)"
+        else:
+            predicate = "{field} ~ %(pattern)s"
+            score = "1.0"
+        branches = []
+        for table, field, weight in [
+            ("entities", "label_folded", 2.0),
+            ("aliases", "alias_folded", 1.5),
+            ("entities", "description_folded", 1.0),
+        ]:
+            branches.append(
+                f"SELECT entity_id, {weight} * {score.format(field=field)} AS score "
+                f"FROM {table} WHERE {predicate.format(field=field)}"
+            )
+        statement = """
+            WITH matches AS ( %s ), ranked AS (
+                SELECT entity_id, max(score) AS score FROM matches GROUP BY entity_id
+            ), candidates AS (
+                SELECT e.*, r.score FROM ranked r JOIN entities e USING (entity_id)
+                ORDER BY r.score DESC, e.popularity DESC, e.entity_id LIMIT 50
+            )
+            SELECT c.*, ARRAY(SELECT a.alias FROM aliases a
+                WHERE a.entity_id = c.entity_id ORDER BY a.alias) AS aliases
+            FROM candidates c ORDER BY c.score DESC, c.popularity DESC, c.entity_id
+        """ % " UNION ALL ".join(branches)
+        import re
+        pattern = (r"\m" if query[0].isalnum() else "") + re.escape(query)
+        pattern += r"\M" if query[-1].isalnum() else ""
+        with self.conn:
+            with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("SELECT set_config('statement_timeout', %s, true)",
+                               (str(self.statement_timeout_ms),))
+                cursor.execute("SELECT set_config('pg_trgm.similarity_threshold', %s, true)",
+                               (str(self.fuzzy_config.min_similarity),))
+                cursor.execute(statement, {"query": query, "pattern": pattern,
+                                           "distance": self.fuzzy_config.max_distance})
+                return self._process_rows(cursor.fetchall())
+
     def _process_rows(self, rows: List[Dict]) -> List[DatabaseRecord]:
         records = []
         for row in rows:
             row_dict = dict(row)
             row_dict['source'] = 'postgres'
+            if isinstance(row_dict.get('embedding'), (bytes, memoryview)):
+                import pickle
+                row_dict['embedding'] = pickle.loads(bytes(row_dict['embedding']))
             record = self.map_to_record(row_dict)
             records.append(record)
         return records
@@ -882,7 +1018,7 @@ class PostgresLayer(DatabaseLayer):
                     alias_values.append((entity.entity_id, alias))
             
             # Delete old aliases if overwrite
-            if overwrite and alias_values:
+            if overwrite and entities:
                 entity_ids = [e.entity_id for e in entities]
                 cursor.execute(
                     "DELETE FROM aliases WHERE entity_id = ANY(%s)",
@@ -1100,7 +1236,8 @@ class DatabaseChainComponent(BaseComponent[L2Config]):
 
             layer_results = layer.search_many([mentions[index] for index in pending])
             next_pending = []
-            for index, candidates in zip(pending, layer_results):
+            for position, index in enumerate(pending):
+                candidates = layer_results[position] if position < len(layer_results) else []
                 candidates = self.deduplicate_candidates(candidates)
                 if candidates:
                     results[index] = candidates
@@ -1111,6 +1248,10 @@ class DatabaseChainComponent(BaseComponent[L2Config]):
 
         return results
     
+    def batch_search(self, mentions: List[str]) -> List[List[DatabaseRecord]]:
+        """Compatibility alias with per-mention fallback and cache writeback."""
+        return self.search_many(mentions)
+
     def _cache_write(self, query: str, results: List[DatabaseRecord], source_layer: DatabaseLayer):
         """Write results to upper layers (higher priority = checked earlier)"""
         for layer in self.layers:

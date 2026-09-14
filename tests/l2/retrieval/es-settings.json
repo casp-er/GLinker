@@ -1,0 +1,46 @@
+{
+  "settings": {
+    "number_of_replicas": 0,
+    "analysis": {
+      "analyzer": {
+        "entity_analyzer": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": [
+            "icu_folding"
+          ]
+        }
+      }
+    }
+  },
+  "mappings": {
+    "properties": {
+      "entity_id": {
+        "type": "keyword"
+      },
+      "label": {
+        "type": "text",
+        "analyzer": "entity_analyzer",
+        "fields": {
+          "keyword": {
+            "type": "keyword"
+          }
+        }
+      },
+      "aliases": {
+        "type": "text",
+        "analyzer": "entity_analyzer"
+      },
+      "description": {
+        "type": "text",
+        "analyzer": "entity_analyzer"
+      },
+      "entity_type": {
+        "type": "keyword"
+      },
+      "popularity": {
+        "type": "integer"
+      }
+    }
+  }
+}
