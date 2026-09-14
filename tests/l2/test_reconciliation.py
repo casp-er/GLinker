@@ -126,3 +126,28 @@ def test_builder_forwards_redis_password():
         "db": 1,
         "password": "secret",
     }
+
+
+def test_postgres_chunked_batch_isolates_a_failing_chunk():
+    from glinker.l2.component import PostgresLayer
+
+    with patch.object(PostgresLayer, "_setup", return_value=None):
+        layer = PostgresLayer(
+            LayerConfig(type="postgres", priority=0, search_mode=["exact"], config={"dsn": "service=test"})
+        )
+    layer.statement_timeout_ms = 400  # -> _chunk_size() == 2
+
+    one = DatabaseRecord(entity_id="Q1", label="one")
+    two = DatabaseRecord(entity_id="Q2", label="two")
+    layer._batch_retrieve = MagicMock(side_effect=[
+        [[one], [two]],
+        RuntimeError("simulated statement timeout"),
+    ])
+
+    result = layer._batch_retrieve_chunked(["a", "b", "c", "d"], fuzzy=False)
+
+    assert result == [[one], [two], [], []]
+    assert layer._batch_retrieve.call_count == 2
+    assert layer._batch_retrieve.call_args_list[0].args == (["a", "b"],)
+    assert layer._batch_retrieve.call_args_list[0].kwargs == {"fuzzy": False}
+    assert layer._batch_retrieve.call_args_list[1].args == (["c", "d"],)

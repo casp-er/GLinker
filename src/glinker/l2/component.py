@@ -891,7 +891,12 @@ class ElasticsearchLayer(DatabaseLayer):
 
 class PostgresLayer(DatabaseLayer):
     """PostgreSQL database layer"""
-    
+
+    # Class-level fallback matching _setup's config default, so
+    # _chunk_size() has a safe value even if a caller (or a test that
+    # patches out _setup) never runs _setup's config-derived assignment.
+    statement_timeout_ms = 5000
+
     def _setup(self):
         from psycopg2 import sql
 
@@ -1013,7 +1018,7 @@ class PostgresLayer(DatabaseLayer):
 
         try:
             if unique and "exact" in self.config.search_mode:
-                exact_results = self._batch_retrieve(unique, fuzzy=False)
+                exact_results = self._batch_retrieve_chunked(unique, fuzzy=False)
                 for query, records in zip(unique, exact_results):
                     results_by_query[query] = records
 
@@ -1024,7 +1029,7 @@ class PostgresLayer(DatabaseLayer):
                 and self.supports_fuzzy()
             ]
             if missing:
-                fuzzy_results = self._batch_retrieve(missing, fuzzy=True)
+                fuzzy_results = self._batch_retrieve_chunked(missing, fuzzy=True)
                 for query, records in zip(missing, fuzzy_results):
                     results_by_query[query] = records
         except Exception as e:
@@ -1032,6 +1037,36 @@ class PostgresLayer(DatabaseLayer):
             return [[] for _ in queries]
 
         return [results_by_query.get(query, []) for query in normalized]
+
+    # Conservative estimate of per-mention SQL cost, used only to size
+    # batches defensively against statement_timeout. Real cost varies with
+    # corpus size and popularity distribution; measured cost against a real
+    # 50K-entity corpus was ~80-90ms/mention, so this leaves real margin.
+    _ASSUMED_MS_PER_MENTION = 200
+
+    def _chunk_size(self) -> int:
+        return max(1, self.statement_timeout_ms // self._ASSUMED_MS_PER_MENTION)
+
+    def _batch_retrieve_chunked(self, queries: List[str], fuzzy: bool) -> List[List[DatabaseRecord]]:
+        """Splits a large query list into statement_timeout-safe chunks.
+
+        A single _batch_retrieve call costs roughly N * per-mention SQL
+        work; above the timeout-derived chunk size this can exceed
+        statement_timeout and cancel the WHOLE batch, not just the slow
+        part. Chunking keeps each statement inside a safe margin, and a
+        chunk that still fails only empties that chunk's mentions rather
+        than the entire search_many call.
+        """
+        chunk_size = self._chunk_size()
+        results: List[List[DatabaseRecord]] = []
+        for i in range(0, len(queries), chunk_size):
+            chunk = queries[i:i + chunk_size]
+            try:
+                results.extend(self._batch_retrieve(chunk, fuzzy=fuzzy))
+            except Exception as e:
+                print(f"[ERROR Postgres] Chunk search error ({len(chunk)} mentions): {e}")
+                results.extend([[] for _ in chunk])
+        return results
 
     def _batch_retrieve(self, queries: List[str], fuzzy: bool) -> List[List[DatabaseRecord]]:
         """Resolve many already-normalized queries in one round trip.

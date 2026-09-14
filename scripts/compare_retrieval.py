@@ -98,10 +98,16 @@ def compare(args):
         mentions = [case["mention"] for case in cases]
         top3_by_mention = {c["mention"]: set(c["pg_top3"]) for c in report["cases"]}
 
-        # Batched throughput: one search_many call for the whole corpus, not
-        # 291 separate round trips like the per-case loop above.
+        # Batched throughput: search_many called once per article-sized
+        # chunk (broadside-ml's real GLINKER_MAX_MENTIONS cap), not one
+        # call for the whole corpus — the whole-corpus shape doesn't occur
+        # in production and, before PostgresLayer grew defensive chunking,
+        # silently failed outright above the statement_timeout.
+        ARTICLE_MENTION_CAP = 15
+        batched_records = []
         start = time.perf_counter()
-        batched_records = pg.search_many(mentions)
+        for i in range(0, len(mentions), ARTICLE_MENTION_CAP):
+            batched_records.extend(pg.search_many(mentions[i:i + ARTICLE_MENTION_CAP]))
         batched_ms = (time.perf_counter() - start) * 1000
         batched_regressions = [
             mention for mention, records in zip(mentions, batched_records)
