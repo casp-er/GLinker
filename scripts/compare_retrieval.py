@@ -16,8 +16,8 @@ from pathlib import Path
 import psycopg2
 from psycopg2 import sql
 from elasticsearch import Elasticsearch
-from glinker.l2.component import ElasticsearchLayer, PostgresLayer
-from glinker.l2.models import DatabaseRecord, LayerConfig
+from glinker.l2.component import DatabaseChainComponent, ElasticsearchLayer, PostgresLayer, RedisLayer
+from glinker.l2.models import DatabaseRecord, L2Config, LayerConfig
 from init_postgres import initialize
 
 
@@ -95,6 +95,64 @@ def compare(args):
                 set(c["es_top3"]) == set(c["pg_top3"]) for c in report["cases"]
             ),
         }
+        mentions = [case["mention"] for case in cases]
+        top3_by_mention = {c["mention"]: set(c["pg_top3"]) for c in report["cases"]}
+
+        # Batched throughput: one search_many call for the whole corpus, not
+        # 291 separate round trips like the per-case loop above.
+        start = time.perf_counter()
+        batched_records = pg.search_many(mentions)
+        batched_ms = (time.perf_counter() - start) * 1000
+        batched_regressions = [
+            mention for mention, records in zip(mentions, batched_records)
+            if {r.entity_id for r in sorted(records, key=lambda r: r.popularity, reverse=True)[:3]}
+            != top3_by_mention[mention]
+        ]
+        report["batched"] = {
+            "mentions": len(mentions),
+            "total_ms": round(batched_ms, 2),
+            "per_mention_ms": round(batched_ms / len(mentions), 2),
+            "regressions_vs_sequential": batched_regressions,
+        }
+
+        # Warm-cache: a Redis layer in front of the same PostgresLayer,
+        # queried cold then re-queried with the same mentions — the repeat-
+        # entity traffic pattern a real news pipeline produces in steady state.
+        redis_layer = RedisLayer(
+            LayerConfig(
+                type="redis", priority=1, write=True, cache_policy="always",
+                ttl=args.redis_ttl, search_mode=["exact"],
+                config={"host": args.redis_host, "port": int(args.redis_port), "db": 0},
+            )
+        )
+        chain = DatabaseChainComponent(L2Config(layers=[]))
+        chain.layers = [redis_layer, pg]
+        try:
+            start = time.perf_counter()
+            chain.search_many(mentions)
+            cold_ms = (time.perf_counter() - start) * 1000
+
+            start = time.perf_counter()
+            warm_records = chain.search_many(mentions)
+            warm_ms = (time.perf_counter() - start) * 1000
+
+            warm_regressions = [
+                mention for mention, records in zip(mentions, warm_records)
+                if {r.entity_id for r in sorted(records, key=lambda r: r.popularity, reverse=True)[:3]}
+                != top3_by_mention[mention]
+            ]
+            report["cache"] = {
+                "mentions": len(mentions),
+                "cold_total_ms": round(cold_ms, 2),
+                "cold_per_mention_ms": round(cold_ms / len(mentions), 2),
+                "warm_total_ms": round(warm_ms, 2),
+                "warm_per_mention_ms": round(warm_ms / len(mentions), 2),
+                "regressions_vs_sequential": warm_regressions,
+            }
+        finally:
+            redis_layer.clear()
+            redis_layer.client.close()
+
         # Verify the planner can use each trigram index, including fuzzy ops.
         report["index_plans"] = []
         with pg.conn:
@@ -111,7 +169,10 @@ def compare(args):
                         )
                         report["index_plans"].append(cur.fetchone()[0])
         Path(args.output).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
-        print(json.dumps(report["summary"], indent=2))
+        print(json.dumps(
+            {"summary": report["summary"], "batched": report["batched"], "cache": report["cache"]},
+            indent=2,
+        ))
     finally:
         if pg:
             pg.conn.close()
@@ -127,6 +188,7 @@ def compare(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    for option in ["pg-dsn", "es-host", "es-settings", "corpus", "mentions", "output"]:
+    for option in ["pg-dsn", "es-host", "es-settings", "corpus", "mentions", "redis-host", "redis-port", "output"]:
         parser.add_argument("--" + option, required=True)
+    parser.add_argument("--redis-ttl", type=int, default=7 * 24 * 3600)
     compare(parser.parse_args())
