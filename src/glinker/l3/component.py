@@ -95,7 +95,6 @@ class L3Component(BaseComponent[L3Config]):
             threshold=self.config.threshold,
             flat_ner=self.config.flat_ner,
             multi_label=self.config.multi_label,
-            return_class_probs=True
         )
         if input_spans is not None:
             kwargs["input_spans"] = input_spans
@@ -140,7 +139,6 @@ class L3Component(BaseComponent[L3Config]):
             threshold=self.config.threshold,
             flat_ner=self.config.flat_ner,
             multi_label=self.config.multi_label,
-            return_class_probs=True
         )
         if input_spans is not None:
             kwargs["input_spans"] = input_spans
