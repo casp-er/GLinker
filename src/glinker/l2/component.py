@@ -992,6 +992,9 @@ class PostgresLayer(DatabaseLayer):
     # word-boundary regex and similarity operators then devolve into broad
     # scans on a production-sized KB (for example, "us" scans every row).
     _MIN_TRIGRAM_QUERY_LENGTH = 4
+    # Fuzzy typo matching is for short surface forms; long queries never
+    # benefit from it and dominate the KNN walk on large KBs.
+    _MAX_FUZZY_QUERY_LENGTH = 40
 
     def _setup(self):
         from psycopg2 import sql
@@ -1182,6 +1185,7 @@ class PostgresLayer(DatabaseLayer):
                 if not outcomes[query].candidates
                 and query not in failed
                 and len(query) >= self._MIN_TRIGRAM_QUERY_LENGTH
+                and len(query) <= self._MAX_FUZZY_QUERY_LENGTH
                 and "fuzzy" in self.config.search_mode
                 and self.supports_fuzzy()
             ]
@@ -1375,11 +1379,17 @@ class PostgresLayer(DatabaseLayer):
             # the global popularity-aware ranking still sees them.
             qualified = f"t.{field}"
             if fuzzy:
+                # Top-k via the trigram GiST KNN ordering: LIMIT 100 with a
+                # computed ORDER BY similarity(...) still evaluates every
+                # index-matched row (a common word matches hundreds of
+                # thousands of aliases on the production KB, blowing the
+                # statement timeout), while <-> walks the index
+                # nearest-first and stops after the limit.
                 branches.append(
-                    f"(SELECT t.entity_id, {weight} * similarity({qualified}, i.query) AS score "
+                    f"(SELECT t.entity_id, {weight} * (1 - ({qualified} <-> i.query)) AS score "
                     f"FROM {table} t "
                     f"WHERE {predicate.format(field=qualified)} "
-                    f"ORDER BY score DESC LIMIT 100)"
+                    f"ORDER BY {qualified} <-> i.query LIMIT 100)"
                 )
             elif table == "entities":
                 branches.append(

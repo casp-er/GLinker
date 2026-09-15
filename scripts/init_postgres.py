@@ -70,6 +70,15 @@ def initialize(conn, schema):
                 CREATE INDEX IF NOT EXISTS entities_label_trgm ON entities USING gin (label_folded gin_trgm_ops);
                 CREATE INDEX IF NOT EXISTS entities_description_trgm ON entities USING gin (description_folded gin_trgm_ops);
                 CREATE INDEX IF NOT EXISTS aliases_alias_trgm ON aliases USING gin (alias_folded gin_trgm_ops);
+                -- GIN serves % similarity and ~ regex rechecks, but cannot
+                -- order: the fuzzy phase's bounded KNN (ORDER BY field <->
+                -- query LIMIT) needs GiST, which walks trigram distance
+                -- nearest-first and stops at the limit. Without it the KNN
+                -- ordering degrades to a full scan + sort and blows the
+                -- statement timeout on a production-sized KB.
+                CREATE INDEX IF NOT EXISTS entities_label_gist ON entities USING gist (label_folded gist_trgm_ops);
+                CREATE INDEX IF NOT EXISTS entities_description_gist ON entities USING gist (description_folded gist_trgm_ops);
+                CREATE INDEX IF NOT EXISTS aliases_alias_gist ON aliases USING gist (alias_folded gist_trgm_ops);
             """)
 
 
