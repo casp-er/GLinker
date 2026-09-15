@@ -79,6 +79,11 @@ def initialize(conn, schema):
                 CREATE INDEX IF NOT EXISTS entities_label_gist ON entities USING gist (label_folded gist_trgm_ops);
                 CREATE INDEX IF NOT EXISTS entities_description_gist ON entities USING gist (description_folded gist_trgm_ops);
                 CREATE INDEX IF NOT EXISTS aliases_alias_gist ON aliases USING gist (alias_folded gist_trgm_ops);
+                -- The direct equality pass needs precise cheap lookups; the
+                -- lossy GiST trigram index is far slower for = and, once it
+                -- exists, the planner prefers it over the GIN for equality.
+                CREATE INDEX IF NOT EXISTS entities_label_btree ON entities (label_folded);
+                CREATE INDEX IF NOT EXISTS aliases_alias_btree ON aliases (alias_folded);
             """)
 
 
