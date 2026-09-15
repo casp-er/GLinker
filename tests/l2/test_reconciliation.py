@@ -3,8 +3,19 @@
 import json
 from unittest.mock import MagicMock, patch
 
-from glinker.l2.component import DatabaseChainComponent, RedisLayer, ElasticsearchLayer, PostgresLayer
-from glinker.l2.models import DatabaseRecord, LayerConfig, L2Config
+from glinker.l2.component import (
+    DatabaseChainComponent,
+    RedisLayer,
+    ElasticsearchLayer,
+    PostgresLayer,
+)
+from glinker.l2.models import (
+    DatabaseRecord,
+    LayerConfig,
+    L2Config,
+    RetrievalFailure,
+    MentionRetrieval,
+)
 
 
 def test_redis_embedding_update_does_not_scan_aliases():
@@ -38,13 +49,15 @@ def test_partial_layer_hits_continue_for_missing_mentions():
     cached = DatabaseRecord(entity_id="Q1", label="one")
     fetched = DatabaseRecord(entity_id="Q2", label="two")
     first, second = MagicMock(), MagicMock()
-    first.search_many.return_value = [[cached]]  # Short backend response.
-    second.search_many.return_value = [[fetched]]
+    first.search_many_detailed.return_value = [
+        MentionRetrieval(candidates=[cached])
+    ]  # Short backend response.
+    second.search_many_detailed.return_value = [MentionRetrieval(candidates=[fetched])]
     chain.layers = [first, second]
     chain._cache_write_many = MagicMock()
     result = chain.batch_search(["one", "two"])
     assert result == [[cached], [fetched]]
-    second.search_many.assert_called_once_with(["two"])
+    second.search_many_detailed.assert_called_once_with(["two"])
     assert chain._cache_write_many.call_count == 2
 
 
@@ -62,9 +75,7 @@ def test_redis_search_many_batches_query_and_embedding_reads():
 
     results = layer.search_many(["One", "missing", "one"])
 
-    assert [[record.entity_id for record in result] for result in results] == [
-        ["Q1"], [], ["Q1"]
-    ]
+    assert [[record.entity_id for record in result] for result in results] == [["Q1"], [], ["Q1"]]
     assert results[0][0].embedding == [1.0]
     assert pipe.execute.call_count == 2
 
@@ -77,7 +88,10 @@ def test_chain_batches_cache_writeback_for_many_hits():
     cache.cache_policy = "always"
     cache.ttl = 60
     cache.is_available.return_value = True
-    cache.search_many.return_value = [[], []]
+    cache.search_many_detailed.return_value = [
+        MentionRetrieval(),
+        MentionRetrieval(),
+    ]
     source = MagicMock()
     source.priority = 0
     source.write = False
@@ -86,7 +100,10 @@ def test_chain_batches_cache_writeback_for_many_hits():
         DatabaseRecord(entity_id="Q1", label="one"),
         DatabaseRecord(entity_id="Q2", label="two"),
     ]
-    source.search_many.return_value = [[records[0]], [records[1]]]
+    source.search_many_detailed.return_value = [
+        MentionRetrieval(candidates=[records[0]]),
+        MentionRetrieval(candidates=[records[1]]),
+    ]
     chain.layers = [cache, source]
 
     assert chain.search_many(["one", "two"]) == [[records[0]], [records[1]]]
@@ -107,9 +124,7 @@ def test_redis_write_cache_many_uses_one_pipeline_execution():
     layer.write_cache_many([("one", [records[0]]), ("two", [records[1]])], 60)
 
     assert pipe.execute.call_count == 1
-    assert [call.args[0] for call in pipe.setex.call_args_list] == [
-        "entity:one", "entity:two"
-    ]
+    assert [call.args[0] for call in pipe.setex.call_args_list] == ["entity:one", "entity:two"]
 
 
 def test_es_fuzzy_batch_only_for_missing_unique_mentions():
@@ -140,17 +155,139 @@ def test_postgres_fuzzy_batch_only_for_missing_unique_mentions():
             )
         )
     one = DatabaseRecord(entity_id="Q1", label="one")
-    two = DatabaseRecord(entity_id="Q2", label="two")
-    layer._normalize_many = MagicMock(return_value=["one", "two", "one"])
-    layer._batch_retrieve = MagicMock(side_effect=[[[one], []], [[two]]])
+    two = DatabaseRecord(entity_id="Q2", label="second")
+    layer._normalize_many = MagicMock(return_value=["one", "second", "one"])
+    layer._batch_retrieve_direct_chunked = MagicMock(return_value=([[one], []], {}))
+    layer._batch_retrieve_chunked = MagicMock(side_effect=[([[]], {}), ([[two]], {})])
 
-    assert layer.search_many(["One", "two", "one"]) == [[one], [two], [one]]
+    assert layer.search_many(["One", "second", "one"]) == [[one], [two], [one]]
 
-    exact_call, fuzzy_call = layer._batch_retrieve.call_args_list
-    assert exact_call.args == (["one", "two"],)
-    assert exact_call.kwargs == {"fuzzy": False}
-    assert fuzzy_call.args == (["two"],)
-    assert fuzzy_call.kwargs == {"fuzzy": True}
+    layer._batch_retrieve_direct_chunked.assert_called_once_with(["one", "second"])
+    phrase_call, fuzzy_call = layer._batch_retrieve_chunked.call_args_list
+    assert phrase_call.args == (["second"],)
+    assert phrase_call.kwargs == {"fuzzy": False, "phase": "phrase"}
+    assert fuzzy_call.args == (["second"],)
+    assert fuzzy_call.kwargs == {"fuzzy": True, "phase": "fuzzy"}
+
+
+def test_postgres_short_mentions_only_use_direct_equality():
+    with patch.object(PostgresLayer, "_setup", return_value=None):
+        layer = PostgresLayer(
+            LayerConfig(
+                type="postgres",
+                priority=0,
+                search_mode=["exact", "fuzzy"],
+                config={"dsn": "service=test"},
+            )
+        )
+    us = DatabaseRecord(entity_id="Q30", label="United States", aliases=["US"])
+    layer._normalize_many = MagicMock(return_value=["us", "xy"])
+    layer._batch_retrieve_direct_chunked = MagicMock(return_value=([[us], []], {}))
+    layer._batch_retrieve_chunked = MagicMock()
+
+    assert layer.search_many(["US", "XY"]) == [[us], []]
+
+    layer._batch_retrieve_direct_chunked.assert_called_once_with(["us", "xy"])
+    layer._batch_retrieve_chunked.assert_not_called()
+
+
+def test_postgres_search_many_detailed_reports_backend_failure():
+    with patch.object(PostgresLayer, "_setup", return_value=None):
+        layer = PostgresLayer(
+            LayerConfig(
+                type="postgres",
+                priority=0,
+                search_mode=["exact", "fuzzy"],
+                config={"dsn": "service=test"},
+            )
+        )
+    one = DatabaseRecord(entity_id="Q1", label="one")
+    timeout_failure = RetrievalFailure(
+        layer="PostgresLayer",
+        phase="direct",
+        kind="timeout",
+        message="statement timeout",
+    )
+    layer._normalize_many = MagicMock(return_value=["one", "two"])
+    layer._batch_retrieve_direct_chunked = MagicMock(
+        return_value=([[one], []], {1: timeout_failure})
+    )
+
+    detailed = layer.search_many_detailed(["One", "two"])
+
+    assert [retrieval.status for retrieval in detailed] == ["matched", "backend_error"]
+    assert detailed[1].failures == [timeout_failure]
+    # A failed direct phase must not be retried as phrase or fuzzy search.
+    layer._batch_retrieve_chunked = MagicMock()
+    layer.search_many_detailed(["One", "two"])
+    layer._batch_retrieve_chunked.assert_not_called()
+
+    # The plain candidate view keeps its shape: an operational failure looks
+    # like an empty list there, which is exactly why the detailed API exists.
+    layer._batch_retrieve_direct_chunked = MagicMock(return_value=([[one]], {1: timeout_failure}))
+    assert layer.search_many(["One", "two"]) == [[one], []]
+
+
+def test_postgres_normalize_failure_is_backend_error_not_miss():
+    with patch.object(PostgresLayer, "_setup", return_value=None):
+        layer = PostgresLayer(
+            LayerConfig(
+                type="postgres",
+                priority=0,
+                search_mode=["exact"],
+                config={"dsn": "service=test"},
+            )
+        )
+    layer._normalize_many = MagicMock(side_effect=RuntimeError("connection closed"))
+
+    detailed = layer.search_many_detailed(["One", "Two"])
+
+    assert [retrieval.status for retrieval in detailed] == ["backend_error", "backend_error"]
+    assert all(
+        failure.phase == "normalize" and failure.kind == "query_error"
+        for retrieval in detailed
+        for failure in retrieval.failures
+    )
+
+
+def test_chain_layer_outage_falls_through_and_stays_reported():
+    class OutageLayer:
+        priority = 1
+        write = False
+
+        def is_available(self):
+            return True
+
+        def search_many_detailed(self, queries):
+            raise RuntimeError("cache down")
+
+    class PostgresStubLayer:
+        priority = 0
+        write = False
+
+        def is_available(self):
+            return True
+
+        def search_many_detailed(self, queries):
+            return [
+                MentionRetrieval(candidates=[DatabaseRecord(entity_id="Q1", label="one")])
+                if query == "one"
+                else MentionRetrieval()
+                for query in queries
+            ]
+
+    chain = DatabaseChainComponent(L2Config(layers=[]))
+    chain.layers = [OutageLayer(), PostgresStubLayer()]
+
+    detailed = chain.search_many_detailed(["one", "two"])
+
+    # "one" resolves via the fallback layer, so the outage failure is
+    # superseded; "two" stays unknown and must carry the outage failure.
+    assert [retrieval.status for retrieval in detailed] == ["matched", "backend_error"]
+    assert detailed[0].failures == []
+    assert [(f.layer, f.phase, f.kind) for f in detailed[1].failures] == [
+        ("OutageLayer", "availability", "query_error")
+    ]
 
 
 def test_builder_preserves_postgres_dsn_without_overriding_credentials():
@@ -197,21 +334,29 @@ def test_postgres_chunked_batch_isolates_a_failing_chunk():
 
     with patch.object(PostgresLayer, "_setup", return_value=None):
         layer = PostgresLayer(
-            LayerConfig(type="postgres", priority=0, search_mode=["exact"], config={"dsn": "service=test"})
+            LayerConfig(
+                type="postgres", priority=0, search_mode=["exact"], config={"dsn": "service=test"}
+            )
         )
-    layer.statement_timeout_ms = 400  # -> _chunk_size() == 2
+    layer.statement_timeout_ms = 2000  # -> _chunk_size() == 2
 
     one = DatabaseRecord(entity_id="Q1", label="one")
     two = DatabaseRecord(entity_id="Q2", label="two")
-    layer._batch_retrieve = MagicMock(side_effect=[
-        [[one], [two]],
-        RuntimeError("simulated statement timeout"),
-    ])
+    layer._batch_retrieve = MagicMock(
+        side_effect=[
+            [[one], [two]],
+            RuntimeError("simulated statement timeout"),
+        ]
+    )
 
     results, failed_indices = layer._batch_retrieve_chunked(["a", "b", "c", "d"], fuzzy=False)
 
     assert results == [[one], [two], [], []]
-    assert failed_indices == {2, 3}
+    assert set(failed_indices) == {2, 3}
+    assert all(
+        failure.phase == "phrase" and failure.kind == "query_error"
+        for failure in failed_indices.values()
+    )
     assert layer._batch_retrieve.call_count == 2
     assert layer._batch_retrieve.call_args_list[0].args == (["a", "b"],)
     assert layer._batch_retrieve.call_args_list[0].kwargs == {"fuzzy": False}
@@ -237,14 +382,20 @@ def test_postgres_search_many_skips_fuzzy_retry_for_failed_chunk_mentions():
     layer._normalize_many = MagicMock(return_value=["one", "two"])
 
     one = DatabaseRecord(entity_id="Q1", label="one")
-    # "one" resolves normally; "two" lands in a chunk that failed, so index 1
-    # is reported as failed even though its result slot is also `[]`.
-    layer._batch_retrieve_chunked = MagicMock(return_value=([[one], []], {1}))
+    # "one" resolves normally; "two" lands in a direct-search chunk that
+    # failed, so index 1 is unknown rather than a genuine miss.
+    layer._batch_retrieve_direct_chunked = MagicMock(
+        return_value=(
+            [[one], []],
+            {1: RetrievalFailure(layer="PostgresLayer", phase="direct", kind="timeout")},
+        )
+    )
+    layer._batch_retrieve_chunked = MagicMock()
 
     assert layer.search_many(["One", "two"]) == [[one], []]
 
-    # Only the exact phase should run - no fuzzy retry for "two".
-    layer._batch_retrieve_chunked.assert_called_once_with(["one", "two"], fuzzy=False)
+    # Neither the phrase nor fuzzy phase should retry "two".
+    layer._batch_retrieve_chunked.assert_not_called()
 
 
 def test_postgres_overwrite_invalidates_changed_label_embeddings():

@@ -11,12 +11,35 @@ import psycopg2
 from psycopg2.extras import RealDictCursor, execute_batch
 
 from glinker.core.base import BaseComponent
-from .models import L2Config, LayerConfig, FuzzyConfig, DatabaseRecord
+from .models import (
+    L2Config,
+    LayerConfig,
+    FuzzyConfig,
+    DatabaseRecord,
+    RetrievalFailure,
+    MentionRetrieval,
+)
+
+
+def _classify_retrieval_error(error: Exception) -> str:
+    """Map a backend exception to a RetrievalFailure kind.
+
+    QueryCanceled is a subclass of OperationalError, so it must be tested
+    first; everything else that psycopg2 reports about the connection or
+    server state is an availability problem rather than a query bug.
+    """
+    from psycopg2 import errors as pg_errors
+
+    if isinstance(error, pg_errors.QueryCanceled):
+        return "timeout"
+    if isinstance(error, (pg_errors.InterfaceError, pg_errors.OperationalError)):
+        return "unavailable"
+    return "query_error"
 
 
 class DatabaseLayer(ABC):
     """Base class for all database layers"""
-    
+
     def __init__(self, config: LayerConfig):
         self.config = config
         self.priority = config.priority
@@ -26,16 +49,16 @@ class DatabaseLayer(ABC):
         self.field_mapping = config.field_mapping
         self.fuzzy_config = config.fuzzy or FuzzyConfig()
         self._setup()
-    
+
     @abstractmethod
     def _setup(self):
         """Initialize layer resources"""
         pass
-    
+
     def normalize_query(self, query: str) -> str:
         """Normalize query for search"""
         return query.lower().strip()
-    
+
     @abstractmethod
     def search(self, query: str) -> List[DatabaseRecord]:
         """Exact search"""
@@ -54,38 +77,47 @@ class DatabaseLayer(ABC):
                 found = self.search_fuzzy(query)
             results.append(found)
         return results
-    
+
+    def search_many_detailed(self, queries: List[str]) -> List[MentionRetrieval]:
+        """Search multiple queries, keeping operational failures explicit.
+
+        Default wraps search_many: candidates without failures. Layers that
+        can distinguish "confirmed miss" from "backend outage" should
+        override this and report RetrievalFailure entries.
+        """
+        return [MentionRetrieval(candidates=candidates) for candidates in self.search_many(queries)]
+
     @abstractmethod
     def search_fuzzy(self, query: str) -> List[DatabaseRecord]:
         """Fuzzy search"""
         pass
-    
+
     def supports_fuzzy(self) -> bool:
         """Check if layer supports fuzzy search"""
         return self.fuzzy_config is not None
-    
+
     @abstractmethod
     def write_cache(self, key: str, records: List[DatabaseRecord], ttl: int):
         """Write records to cache"""
         pass
 
-    def write_cache_many(
-        self, entries: List[tuple[str, List[DatabaseRecord]]], ttl: int
-    ):
+    def write_cache_many(self, entries: List[tuple[str, List[DatabaseRecord]]], ttl: int):
         """Write multiple query results, with a correct per-entry fallback."""
         for key, records in entries:
             self.write_cache(key, records, ttl)
-    
+
     @abstractmethod
     def is_available(self) -> bool:
         """Check if layer is available"""
         pass
-    
+
     @abstractmethod
-    def load_bulk(self, entities: List[DatabaseRecord], overwrite: bool = False, batch_size: int = 1000) -> int:
+    def load_bulk(
+        self, entities: List[DatabaseRecord], overwrite: bool = False, batch_size: int = 1000
+    ) -> int:
         """Bulk load entities"""
         pass
-    
+
     def clear(self):
         """Clear all data in layer"""
         pass
@@ -99,10 +131,7 @@ class DatabaseLayer(ABC):
         return []
 
     def update_embeddings(
-        self,
-        entity_ids: List[str],
-        embeddings: List[List[float]],
-        model_id: str
+        self, entity_ids: List[str], embeddings: List[List[float]], model_id: str
     ) -> int:
         """Update embeddings for entities"""
         return 0
@@ -115,44 +144,44 @@ class DatabaseLayer(ABC):
                 mapped[standard_field] = raw_data[db_field]
 
         # Handle embedding fields directly (not in field_mapping)
-        if 'embedding' in raw_data:
-            mapped['embedding'] = raw_data['embedding']
-        if 'embedding_model_id' in raw_data:
-            mapped['embedding_model_id'] = raw_data['embedding_model_id']
+        if "embedding" in raw_data:
+            mapped["embedding"] = raw_data["embedding"]
+        if "embedding_model_id" in raw_data:
+            mapped["embedding_model_id"] = raw_data["embedding_model_id"]
 
-        mapped['source'] = self.config.type
+        mapped["source"] = self.config.type
         return DatabaseRecord(**mapped)
 
 
 class DictLayer(DatabaseLayer):
     """Simple dict-based storage for small entity sets (<5000)"""
-    
+
     def _setup(self):
         self._storage: Dict[str, DatabaseRecord] = {}
         self._label_index: Dict[str, str] = {}
         self._alias_index: Dict[str, Set[str]] = {}
-    
+
     def search(self, query: str) -> List[DatabaseRecord]:
         """Fast O(1) exact search using indexes"""
         query_key = self.normalize_query(query)
         results = []
         seen = set()
-        
+
         # Label lookup
         if query_key in self._label_index:
             eid = self._label_index[query_key]
             results.append(self._storage[eid])
             seen.add(eid)
-        
+
         # Alias lookup
         if query_key in self._alias_index:
             for eid in self._alias_index[query_key]:
                 if eid not in seen:
                     results.append(self._storage[eid])
                     seen.add(eid)
-        
+
         return results
-    
+
     def search_fuzzy(self, query: str) -> List[DatabaseRecord]:
         """Simple fuzzy search for small datasets (O(n) is fine for <5000 entities)"""
         try:
@@ -160,79 +189,81 @@ class DictLayer(DatabaseLayer):
         except ImportError:
             print("[WARN DictLayer] rapidfuzz not installed, fuzzy search disabled")
             return []
-        
+
         query_key = self.normalize_query(query)
         results = []
-        
+
         # Check prefix requirement
         if self.fuzzy_config.prefix_length > 0:
-            prefix = query_key[:self.fuzzy_config.prefix_length]
-        
+            prefix = query_key[: self.fuzzy_config.prefix_length]
+
         for entity in self._storage.values():
             # Check label
             label_key = entity.label.lower()
-            
+
             if self.fuzzy_config.prefix_length > 0:
                 if not label_key.startswith(prefix):
                     continue
-            
+
             similarity = fuzz.ratio(query_key, label_key) / 100.0
             if similarity >= self.fuzzy_config.min_similarity:
                 results.append((entity, similarity))
                 continue
-            
+
             # Check aliases
             for alias in entity.aliases:
                 alias_key = alias.lower()
                 if self.fuzzy_config.prefix_length > 0:
                     if not alias_key.startswith(prefix):
                         continue
-                
+
                 sim = fuzz.ratio(query_key, alias_key) / 100.0
                 if sim >= self.fuzzy_config.min_similarity:
                     results.append((entity, sim))
                     break
-        
+
         # Sort by similarity
         results.sort(key=lambda x: x[1], reverse=True)
         return [r[0] for r in results]
-    
+
     def write_cache(self, key: str, records: List[DatabaseRecord], ttl: int):
         """Write is same as load_bulk for dict layer"""
         self.load_bulk(records, overwrite=True)
-    
-    def load_bulk(self, entities: List[DatabaseRecord], overwrite: bool = False, batch_size: int = 1000) -> int:
+
+    def load_bulk(
+        self, entities: List[DatabaseRecord], overwrite: bool = False, batch_size: int = 1000
+    ) -> int:
         """Bulk load entities with indexing"""
         count = 0
         for entity in entities:
             entity_id = entity.entity_id
-            
+
             if not overwrite and entity_id in self._storage:
                 continue
-            
+
             # Store entity
             self._storage[entity_id] = entity
-            
+
             # Index by label
             label_key = entity.label.lower()
             self._label_index[label_key] = entity_id
-            
+
             # Index by aliases
             for alias in entity.aliases:
                 alias_key = alias.lower()
                 if alias_key not in self._alias_index:
                     self._alias_index[alias_key] = set()
                 self._alias_index[alias_key].add(entity_id)
-            
+
             count += 1
         return count
-    
+
     def clear(self):
         """Clear all data"""
         self._storage.clear()
         self._label_index.clear()
         self._alias_index.clear()
-    
+
     def count(self) -> int:
         """Count entities"""
         return len(self._storage)
@@ -242,10 +273,7 @@ class DictLayer(DatabaseLayer):
         return list(self._storage.values())
 
     def update_embeddings(
-        self,
-        entity_ids: List[str],
-        embeddings: List[List[float]],
-        model_id: str
+        self, entity_ids: List[str], embeddings: List[List[float]], model_id: str
     ) -> int:
         """Update embeddings for entities"""
         count = 0
@@ -426,10 +454,9 @@ class RedisLayer(DatabaseLayer):
                 # Store embedding separately if present
                 if embedding is not None:
                     emb_key = f"entity:emb:{r.entity_id}"
-                    emb_data = json.dumps({
-                        "embedding": embedding,
-                        "embedding_model_id": embedding_model_id
-                    })
+                    emb_data = json.dumps(
+                        {"embedding": embedding, "embedding_model_id": embedding_model_id}
+                    )
                     self._cache_set(pipe, emb_key, ttl, emb_data)
 
             # Store main cache data
@@ -440,9 +467,7 @@ class RedisLayer(DatabaseLayer):
         except Exception as e:
             print(f"[ERROR Redis] Write error: {e}")
 
-    def write_cache_many(
-        self, entries: List[tuple[str, List[DatabaseRecord]]], ttl: int
-    ):
+    def write_cache_many(self, entries: List[tuple[str, List[DatabaseRecord]]], ttl: int):
         """Write all cache results in one Redis pipeline execution."""
         if not entries:
             return
@@ -461,10 +486,12 @@ class RedisLayer(DatabaseLayer):
                             pipe,
                             f"entity:emb:{record.entity_id}",
                             ttl,
-                            json.dumps({
-                                "embedding": embedding,
-                                "embedding_model_id": embedding_model_id,
-                            }),
+                            json.dumps(
+                                {
+                                    "embedding": embedding,
+                                    "embedding_model_id": embedding_model_id,
+                                }
+                            ),
                         )
                 self._cache_set(pipe, cache_key, ttl, json.dumps(records_data))
             pipe.execute()
@@ -506,10 +533,9 @@ class RedisLayer(DatabaseLayer):
             # Store embedding SEPARATELY (no duplication)
             if embedding is not None:
                 emb_key = f"entity:emb:{entity.entity_id}"
-                emb_data = json.dumps({
-                    "embedding": embedding,
-                    "embedding_model_id": embedding_model_id
-                })
+                emb_data = json.dumps(
+                    {"embedding": embedding, "embedding_model_id": embedding_model_id}
+                )
                 self._cache_set(pipe, emb_key, self.ttl, emb_data)
 
             # Execute in batches
@@ -604,10 +630,7 @@ class RedisLayer(DatabaseLayer):
 
         for entity_id, embedding in zip(entity_ids, embeddings):
             emb_key = f"entity:emb:{entity_id}"
-            emb_data = json.dumps({
-                "embedding": embedding,
-                "embedding_model_id": model_id
-            })
+            emb_data = json.dumps({"embedding": embedding, "embedding_model_id": model_id})
             self._cache_set(pipe, emb_key, self.ttl, emb_data)
             count += 1
 
@@ -670,11 +693,10 @@ class ElasticsearchLayer(DatabaseLayer):
 
     def _setup(self):
         self.client = Elasticsearch(
-            self.config.config['hosts'],
-            api_key=self.config.config.get('api_key')
+            self.config.config["hosts"], api_key=self.config.config.get("api_key")
         )
-        self.index_name = self.config.config['index_name']
-        self.popularity_boost = self.config.config.get('popularity_boost', False)
+        self.index_name = self.config.config["index_name"]
+        self.popularity_boost = self.config.config.get("popularity_boost", False)
 
     def _build_query(self, match_query: dict) -> dict:
         """Wrap a match query with optional popularity boosting.
@@ -693,15 +715,11 @@ class ElasticsearchLayer(DatabaseLayer):
             "query": {
                 "function_score": {
                     "query": match_query,
-                    "field_value_factor": {
-                        "field": "popularity",
-                        "modifier": "ln2p",
-                        "missing": 1
-                    },
-                    "boost_mode": "multiply"
+                    "field_value_factor": {"field": "popularity", "modifier": "ln2p", "missing": 1},
+                    "boost_mode": "multiply",
                 }
             },
-            "size": 50
+            "size": 50,
         }
 
     def search(self, query: str) -> List[DatabaseRecord]:
@@ -724,11 +742,13 @@ class ElasticsearchLayer(DatabaseLayer):
             }
         }
         if fuzzy:
-            match["multi_match"].update({
-                "fuzziness": self.fuzzy_config.max_distance,
-                "prefix_length": self.fuzzy_config.prefix_length,
-                "max_expansions": 50,
-            })
+            match["multi_match"].update(
+                {
+                    "fuzziness": self.fuzzy_config.max_distance,
+                    "prefix_length": self.fuzzy_config.prefix_length,
+                    "max_expansions": 50,
+                }
+            )
         else:
             match["multi_match"]["type"] = "best_fields"
         return match
@@ -783,7 +803,8 @@ class ElasticsearchLayer(DatabaseLayer):
                     results_by_query[query] = results
 
             missing = [
-                query for query in unique
+                query
+                for query in unique
                 if not results_by_query[query] and "fuzzy" in self.config.search_mode
             ]
             if missing:
@@ -807,16 +828,16 @@ class ElasticsearchLayer(DatabaseLayer):
                     "fields": ["label^2", "aliases^1.5", "description"],
                     "fuzziness": fuzzy_distance,
                     "prefix_length": self.fuzzy_config.prefix_length,
-                    "max_expansions": 50
+                    "max_expansions": 50,
                 }
             }
             body = self._build_query(match_query)
             response = self.client.search(index=self.index_name, body=body)
-            return self._process_hits(response['hits']['hits'])
+            return self._process_hits(response["hits"]["hits"])
         except Exception as e:
             print(f"[ERROR ES] Fuzzy error: {e}")
             return []
-    
+
     def batch_search(self, queries: List[str], fuzzy: bool = False) -> List[List[DatabaseRecord]]:
         """Upstream-compatible explicit-mode batch API (no fallback)."""
         normalized = [self.normalize_query(q) for q in queries]
@@ -825,92 +846,78 @@ class ElasticsearchLayer(DatabaseLayer):
     def _process_hits(self, hits: List[Dict]) -> List[DatabaseRecord]:
         records = []
         for hit in hits:
-            source = hit['_source']
-            source['_id'] = hit['_id']
-            source['source'] = 'elasticsearch'
+            source = hit["_source"]
+            source["_id"] = hit["_id"]
+            source["source"] = "elasticsearch"
             record = self.map_to_record(source)
             records.append(record)
         return records
-    
+
     def write_cache(self, key: str, records: List[DatabaseRecord], ttl: int):
         if not records:
             return
-        
+
         try:
             actions = []
             for record in records:
                 doc = self._map_from_record(record)
-                actions.append({
-                    "_index": self.index_name,
-                    "_id": record.entity_id,
-                    "_source": doc
-                })
-            
+                actions.append({"_index": self.index_name, "_id": record.entity_id, "_source": doc})
+
             if actions:
                 es_bulk(self.client, actions)
                 self.client.indices.refresh(index=self.index_name)
         except Exception as e:
             print(f"[ERROR ES] Write error: {e}")
-    
-    def load_bulk(self, entities: List[DatabaseRecord], overwrite: bool = False, batch_size: int = 1000) -> int:
+
+    def load_bulk(
+        self, entities: List[DatabaseRecord], overwrite: bool = False, batch_size: int = 1000
+    ) -> int:
         """Bulk load to Elasticsearch"""
         actions = []
         for entity in entities:
             doc = self._map_from_record(entity)
-            
-            action = {
-                '_index': self.index_name,
-                '_id': entity.entity_id,
-                '_source': doc
-            }
-            
+
+            action = {"_index": self.index_name, "_id": entity.entity_id, "_source": doc}
+
             if overwrite:
-                action['_op_type'] = 'index'
+                action["_op_type"] = "index"
             else:
-                action['_op_type'] = 'create'
-            
+                action["_op_type"] = "create"
+
             actions.append(action)
-        
-        success, failed = es_bulk(
-            self.client,
-            actions,
-            raise_on_error=False,
-            chunk_size=batch_size
-        )
-        
+
+        success, failed = es_bulk(self.client, actions, raise_on_error=False, chunk_size=batch_size)
+
         self.client.indices.refresh(index=self.index_name)
         return success
-    
+
     def _map_from_record(self, record: DatabaseRecord) -> dict:
         """Map DatabaseRecord -> ES document using field_mapping"""
         reverse_mapping = {v: k for k, v in self.field_mapping.items()}
-        
+
         doc = {}
         for standard_field, value in record.dict().items():
-            if standard_field == 'source':
+            if standard_field == "source":
                 continue
-            
+
             es_field = reverse_mapping.get(standard_field, standard_field)
             doc[es_field] = value
-        
+
         return doc
-    
+
     def clear(self):
         """Delete all documents in index"""
         try:
-            self.client.delete_by_query(
-                index=self.index_name,
-                body={"query": {"match_all": {}}}
-            )
+            self.client.delete_by_query(index=self.index_name, body={"query": {"match_all": {}}})
             self.client.indices.refresh(index=self.index_name)
         except Exception as e:
             print(f"[ERROR ES] Clear error: {e}")
-    
+
     def count(self) -> int:
         """Count documents in index"""
         try:
             result = self.client.count(index=self.index_name)
-            return result['count']
+            return result["count"]
         except:
             return 0
 
@@ -921,20 +928,18 @@ class ElasticsearchLayer(DatabaseLayer):
         try:
             # Use scroll API for large datasets
             response = self.client.search(
-                index=self.index_name,
-                body={"query": {"match_all": {}}, "size": 1000},
-                scroll='2m'
+                index=self.index_name, body={"query": {"match_all": {}}, "size": 1000}, scroll="2m"
             )
 
-            scroll_id = response['_scroll_id']
-            hits = response['hits']['hits']
+            scroll_id = response["_scroll_id"]
+            hits = response["hits"]["hits"]
 
             while hits:
                 entities.extend(self._process_hits(hits))
 
-                response = self.client.scroll(scroll_id=scroll_id, scroll='2m')
-                scroll_id = response['_scroll_id']
-                hits = response['hits']['hits']
+                response = self.client.scroll(scroll_id=scroll_id, scroll="2m")
+                scroll_id = response["_scroll_id"]
+                hits = response["hits"]["hits"]
 
             # Clear scroll
             self.client.clear_scroll(scroll_id=scroll_id)
@@ -945,31 +950,22 @@ class ElasticsearchLayer(DatabaseLayer):
         return entities
 
     def update_embeddings(
-        self,
-        entity_ids: List[str],
-        embeddings: List[List[float]],
-        model_id: str
+        self, entity_ids: List[str], embeddings: List[List[float]], model_id: str
     ) -> int:
         """Update embeddings in Elasticsearch"""
         try:
             actions = []
             for eid, emb in zip(entity_ids, embeddings):
-                actions.append({
-                    "_op_type": "update",
-                    "_index": self.index_name,
-                    "_id": eid,
-                    "doc": {
-                        "embedding": emb,
-                        "embedding_model_id": model_id
+                actions.append(
+                    {
+                        "_op_type": "update",
+                        "_index": self.index_name,
+                        "_id": eid,
+                        "doc": {"embedding": emb, "embedding_model_id": model_id},
                     }
-                })
+                )
 
-            success, failed = es_bulk(
-                self.client,
-                actions,
-                raise_on_error=False,
-                chunk_size=500
-            )
+            success, failed = es_bulk(self.client, actions, raise_on_error=False, chunk_size=500)
 
             self.client.indices.refresh(index=self.index_name)
             return success
@@ -992,6 +988,10 @@ class PostgresLayer(DatabaseLayer):
     # _chunk_size() has a safe value even if a caller (or a test that
     # patches out _setup) never runs _setup's config-derived assignment.
     statement_timeout_ms = 5000
+    # pg_trgm cannot extract useful trigrams from very short mentions. The
+    # word-boundary regex and similarity operators then devolve into broad
+    # scans on a production-sized KB (for example, "us" scans every row).
+    _MIN_TRIGRAM_QUERY_LENGTH = 4
 
     def _setup(self):
         from psycopg2 import sql
@@ -999,19 +999,28 @@ class PostgresLayer(DatabaseLayer):
         cfg = self.config.config
         if not cfg.get("dsn") and not cfg.get("database"):
             raise ValueError("PostgresLayer requires an explicit dsn or database")
-        self.conn = psycopg2.connect(cfg.get("dsn", ""), **{
-            key: value for key, value in cfg.items()
-            if key in {"host", "port", "database", "user", "password", "sslmode", "connect_timeout"}
-        })
+        self.conn = psycopg2.connect(
+            cfg.get("dsn", ""),
+            **{
+                key: value
+                for key, value in cfg.items()
+                if key
+                in {"host", "port", "database", "user", "password", "sslmode", "connect_timeout"}
+            },
+        )
         self.schema = cfg.get("schema", "glinker")
         self.statement_timeout_ms = int(cfg.get("statement_timeout_ms", 5000))
         # No DDL on connection. Provision explicitly with scripts/init_postgres.py.
         with self.conn:
             with self.conn.cursor() as cursor:
-                cursor.execute(sql.SQL("SET search_path TO {}, public").format(sql.Identifier(self.schema)))
+                cursor.execute(
+                    sql.SQL("SET search_path TO {}, public").format(sql.Identifier(self.schema))
+                )
                 for name in ("entities", "aliases"):
-                    cursor.execute("SELECT to_regclass(%s)",
-                                   (sql.Identifier(self.schema, name).as_string(self.conn),))
+                    cursor.execute(
+                        "SELECT to_regclass(%s)",
+                        (sql.Identifier(self.schema, name).as_string(self.conn),),
+                    )
                     if cursor.fetchone()[0] is None:
                         raise ValueError(f"GLiNKER schema {self.schema!r} is not provisioned")
 
@@ -1070,12 +1079,22 @@ class PostgresLayer(DatabaseLayer):
         pattern = self._exact_pattern(query)
         with self.conn:
             with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute("SELECT set_config('statement_timeout', %s, true)",
-                               (str(self.statement_timeout_ms),))
-                cursor.execute("SELECT set_config('pg_trgm.similarity_threshold', %s, true)",
-                               (str(self.fuzzy_config.min_similarity),))
-                cursor.execute(statement, {"query": query, "pattern": pattern,
-                                           "distance": self.fuzzy_config.max_distance})
+                cursor.execute(
+                    "SELECT set_config('statement_timeout', %s, true)",
+                    (str(self.statement_timeout_ms),),
+                )
+                cursor.execute(
+                    "SELECT set_config('pg_trgm.similarity_threshold', %s, true)",
+                    (str(self.fuzzy_config.min_similarity),),
+                )
+                cursor.execute(
+                    statement,
+                    {
+                        "query": query,
+                        "pattern": pattern,
+                        "distance": self.fuzzy_config.max_distance,
+                    },
+                )
                 return self._process_rows(cursor.fetchall())
 
     def _exact_pattern(self, query: str) -> str:
@@ -1096,14 +1115,26 @@ class PostgresLayer(DatabaseLayer):
                 return [row[0] for row in cursor.fetchall()]
 
     def search_many(self, queries: List[str]) -> List[List[DatabaseRecord]]:
+        """Resolve many mentions, returning only candidate lists."""
+        return [retrieval.candidates for retrieval in self.search_many_detailed(queries)]
+
+    def search_many_detailed(self, queries: List[str]) -> List[MentionRetrieval]:
         """Resolve many mentions in a bounded number of round trips.
 
         The base class default (DatabaseLayer.search_many) issues a full
         search()/search_fuzzy() round trip per mention — a full database
         round trip for every single entity mention, serially. This override
-        normalizes, exact-searches, and fuzzy-searches (only for exact
+        normalizes, equality-searches, and fuzzy-searches (only for exact
         misses) each in a single batched statement, mirroring
         ElasticsearchLayer._msearch.
+
+        Unlike a plain candidate list, the result distinguishes a confirmed
+        miss (no candidates, no failures) from an operational failure (a
+        phase that raised, e.g. a statement_timeout cancellation). Failed
+        mentions are NOT retried in later phases — that would turn one
+        failed chunk into a sequence of timeouts against a connection that
+        is already saturated, exactly the overload scenario chunking exists
+        to contain.
         """
         if not queries:
             return []
@@ -1111,51 +1142,87 @@ class PostgresLayer(DatabaseLayer):
         try:
             normalized = self._normalize_many(queries)
             unique = list(dict.fromkeys(q for q in normalized if q))
-            results_by_query: Dict[str, List[DatabaseRecord]] = {q: [] for q in unique}
-            # Mentions whose exact-phase chunk raised (e.g. a statement_timeout
-            # cancellation). Their empty result is "unknown", not a genuine
-            # miss, so they must NOT be retried via fuzzy search below - that
-            # would turn one failed exact chunk into an exact-timeout-plus-
-            # fuzzy-timeout, doubling the cost in exactly the overload
-            # scenario chunking exists to contain.
+            outcomes: Dict[str, MentionRetrieval] = {query: MentionRetrieval() for query in unique}
             failed: Set[str] = set()
 
             if unique and "exact" in self.config.search_mode:
-                exact_results, failed_indices = self._batch_retrieve_chunked(unique, fuzzy=False)
-                for idx, (query, records) in enumerate(zip(unique, exact_results)):
-                    results_by_query[query] = records
-                    if idx in failed_indices:
+                # Resolve the common case first with indexed equality over
+                # labels and aliases. Besides being cheaper, this keeps short
+                # mentions such as US/UK/FT away from regex scans that cannot
+                # usefully exploit a trigram index.
+                direct_results, direct_failures = self._batch_retrieve_direct_chunked(unique)
+                for idx, (query, records) in enumerate(zip(unique, direct_results)):
+                    outcomes[query].candidates = records
+                    failure = direct_failures.get(idx)
+                    if failure is not None:
                         failed.add(query)
+                        outcomes[query].failures.append(failure)
+
+                phrase_queries = [
+                    query
+                    for query in unique
+                    if not outcomes[query].candidates
+                    and query not in failed
+                    and len(query) >= self._MIN_TRIGRAM_QUERY_LENGTH
+                ]
+                if phrase_queries:
+                    phrase_results, phrase_failures = self._batch_retrieve_chunked(
+                        phrase_queries, fuzzy=False, phase="phrase"
+                    )
+                    for idx, (query, records) in enumerate(zip(phrase_queries, phrase_results)):
+                        outcomes[query].candidates = records
+                        failure = phrase_failures.get(idx)
+                        if failure is not None:
+                            failed.add(query)
+                            outcomes[query].failures.append(failure)
 
             missing = [
-                query for query in unique
-                if not results_by_query[query]
+                query
+                for query in unique
+                if not outcomes[query].candidates
                 and query not in failed
+                and len(query) >= self._MIN_TRIGRAM_QUERY_LENGTH
                 and "fuzzy" in self.config.search_mode
                 and self.supports_fuzzy()
             ]
             if missing:
-                fuzzy_results, _fuzzy_failed_indices = self._batch_retrieve_chunked(missing, fuzzy=True)
-                for query, records in zip(missing, fuzzy_results):
-                    results_by_query[query] = records
+                fuzzy_results, fuzzy_failures = self._batch_retrieve_chunked(
+                    missing, fuzzy=True, phase="fuzzy"
+                )
+                for idx, (query, records) in enumerate(zip(missing, fuzzy_results)):
+                    outcomes[query].candidates = records
+                    failure = fuzzy_failures.get(idx)
+                    if failure is not None:
+                        outcomes[query].failures.append(failure)
         except Exception as e:
+            # Normalization (or anything outside the per-chunk guards) blew
+            # up: every mention is unknown rather than a confirmed miss.
             print(f"[ERROR Postgres] Batched search error: {e}")
-            return [[] for _ in queries]
+            failure = RetrievalFailure(
+                layer=type(self).__name__,
+                phase="normalize",
+                kind=_classify_retrieval_error(e),
+                message=str(e),
+            )
+            return [MentionRetrieval(failures=[failure]) for _ in queries]
 
-        return [results_by_query.get(query, []) for query in normalized]
+        return [
+            outcomes.get(query, MentionRetrieval()) if query else MentionRetrieval()
+            for query in normalized
+        ]
 
     # Conservative estimate of per-mention SQL cost, used only to size
     # batches defensively against statement_timeout. Real cost varies with
     # corpus size and popularity distribution; measured cost against a real
     # 50K-entity corpus was ~80-90ms/mention, so this leaves real margin.
-    _ASSUMED_MS_PER_MENTION = 200
+    _ASSUMED_MS_PER_MENTION = 1000
 
     def _chunk_size(self) -> int:
         return max(1, self.statement_timeout_ms // self._ASSUMED_MS_PER_MENTION)
 
     def _batch_retrieve_chunked(
-        self, queries: List[str], fuzzy: bool
-    ) -> "tuple[List[List[DatabaseRecord]], Set[int]]":
+        self, queries: List[str], fuzzy: bool, phase: str | None = None
+    ) -> "tuple[List[List[DatabaseRecord]], Dict[int, RetrievalFailure]]":
         """Splits a large query list into statement_timeout-safe chunks.
 
         A single _batch_retrieve call costs roughly N * per-mention SQL
@@ -1165,27 +1232,104 @@ class PostgresLayer(DatabaseLayer):
         chunk that still fails only empties that chunk's mentions rather
         than the entire search_many call.
 
-        Returns (results, failed_indices): results is a flat list aligned
+        Returns (results, failures): results is a flat list aligned
         with `queries` (a failed chunk contributes `[]` per mention, same
-        as before); failed_indices holds the positions in `queries` whose
-        chunk raised. Callers must treat those positions as "unknown", not
-        "confirmed no match" - e.g. search_many uses this to skip a fuzzy
-        retry for mentions whose exact chunk already failed, rather than
-        re-issuing a more expensive query against a connection that may
-        just have timed out.
+        as before); failures maps the positions in `queries` whose
+        chunk raised to the operational failure that emptied them.
+        Callers must treat those positions as "unknown", not
+        "confirmed no match" - e.g. search_many_detailed uses this to skip
+        later phases for mentions whose earlier chunk already failed,
+        rather than re-issuing a more expensive query against a connection
+        that may just have timed out.
         """
+        phase = phase or ("fuzzy" if fuzzy else "phrase")
         chunk_size = self._chunk_size()
         results: List[List[DatabaseRecord]] = []
-        failed_indices: Set[int] = set()
+        failures: Dict[int, RetrievalFailure] = {}
         for i in range(0, len(queries), chunk_size):
-            chunk = queries[i:i + chunk_size]
+            chunk = queries[i : i + chunk_size]
             try:
                 results.extend(self._batch_retrieve(chunk, fuzzy=fuzzy))
             except Exception as e:
-                print(f"[ERROR Postgres] Chunk search error ({len(chunk)} mentions): {e}")
+                print(f"[ERROR Postgres] {phase} chunk search error ({len(chunk)} mentions): {e}")
                 results.extend([[] for _ in chunk])
-                failed_indices.update(range(i, i + len(chunk)))
-        return results, failed_indices
+                for position in range(i, i + len(chunk)):
+                    failures[position] = RetrievalFailure(
+                        layer=type(self).__name__,
+                        phase=phase,
+                        kind=_classify_retrieval_error(e),
+                        message=str(e),
+                    )
+        return results, failures
+
+    def _batch_retrieve_direct_chunked(
+        self, queries: List[str]
+    ) -> "tuple[List[List[DatabaseRecord]], Dict[int, RetrievalFailure]]":
+        """Run cheap label/alias equality lookups in timeout-sized chunks."""
+        chunk_size = self._chunk_size()
+        results: List[List[DatabaseRecord]] = []
+        failures: Dict[int, RetrievalFailure] = {}
+        for i in range(0, len(queries), chunk_size):
+            chunk = queries[i : i + chunk_size]
+            try:
+                results.extend(self._batch_retrieve_direct(chunk))
+            except Exception as e:
+                print(f"[ERROR Postgres] direct chunk search error ({len(chunk)} mentions): {e}")
+                results.extend([[] for _ in chunk])
+                for position in range(i, i + len(chunk)):
+                    failures[position] = RetrievalFailure(
+                        layer=type(self).__name__,
+                        phase="direct",
+                        kind=_classify_retrieval_error(e),
+                        message=str(e),
+                    )
+        return results, failures
+
+    def _batch_retrieve_direct(self, queries: List[str]) -> List[List[DatabaseRecord]]:
+        """Resolve exact label/alias equality matches without broad text scans."""
+        statement = """
+            WITH input AS (
+                SELECT * FROM unnest(%(queries)s::text[])
+                    WITH ORDINALITY AS t(query, idx)
+            ),
+            matches AS (
+                SELECT i.idx, m.entity_id, m.score
+                FROM input i, LATERAL (
+                    SELECT entity_id, 2.0 AS score
+                    FROM entities WHERE label_folded = i.query
+                    UNION ALL
+                    SELECT entity_id, 1.5 AS score
+                    FROM aliases WHERE alias_folded = i.query
+                ) m
+            ),
+            ranked AS (
+                SELECT idx, entity_id, max(score) AS score FROM matches GROUP BY idx, entity_id
+            ),
+            candidates AS (
+                SELECT idx, e.*, r.score,
+                       row_number() OVER (
+                           PARTITION BY idx ORDER BY r.score DESC, e.popularity DESC, e.entity_id
+                       ) AS rn
+                FROM ranked r JOIN entities e USING (entity_id)
+            )
+            SELECT c.*, ARRAY(
+                SELECT a.alias FROM aliases a WHERE a.entity_id = c.entity_id ORDER BY a.alias
+            ) AS aliases
+            FROM candidates c WHERE c.rn <= 50
+            ORDER BY c.idx, c.score DESC, c.popularity DESC, c.entity_id
+        """
+
+        rows_by_idx: Dict[int, List[Dict]] = defaultdict(list)
+        with self.conn, self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(
+                "SELECT set_config('statement_timeout', %s, true)",
+                (str(self.statement_timeout_ms),),
+            )
+            cursor.execute(statement, {"queries": queries})
+            for row in cursor.fetchall():
+                rows_by_idx[row["idx"]].append(dict(row))
+
+        return [self._process_rows(rows_by_idx.get(idx, [])) for idx in range(1, len(queries) + 1)]
 
     def _batch_retrieve(self, queries: List[str], fuzzy: bool) -> List[List[DatabaseRecord]]:
         """Resolve many already-normalized queries in one round trip.
@@ -1212,11 +1356,16 @@ class PostgresLayer(DatabaseLayer):
             patterns = [self._exact_pattern(q) for q in queries]
 
         branches = []
-        for table, field, weight in [
+        search_fields = [
             ("entities", "label_folded", 2.0),
             ("aliases", "alias_folded", 1.5),
-            ("entities", "description_folded", 1.0),
-        ]:
+        ]
+        # Description phrases remain a useful exact fallback, but fuzzy
+        # typo matching against millions of long descriptions produces huge,
+        # noisy candidate sets and dominates cold-cache I/O.
+        if not fuzzy:
+            search_fields.append(("entities", "description_folded", 1.0))
+        for table, field, weight in search_fields:
             branches.append(
                 f"SELECT entity_id, {weight} * {score.format(field=field)} AS score "
                 f"FROM {table} WHERE {predicate.format(field=field)}"
@@ -1252,14 +1401,22 @@ class PostgresLayer(DatabaseLayer):
         rows_by_idx: Dict[int, List[Dict]] = defaultdict(list)
         with self.conn:
             with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute("SELECT set_config('statement_timeout', %s, true)",
-                               (str(self.statement_timeout_ms),))
-                cursor.execute("SELECT set_config('pg_trgm.similarity_threshold', %s, true)",
-                               (str(self.fuzzy_config.min_similarity),))
-                cursor.execute(statement, {
-                    "queries": queries, "patterns": patterns,
-                    "distance": self.fuzzy_config.max_distance,
-                })
+                cursor.execute(
+                    "SELECT set_config('statement_timeout', %s, true)",
+                    (str(self.statement_timeout_ms),),
+                )
+                cursor.execute(
+                    "SELECT set_config('pg_trgm.similarity_threshold', %s, true)",
+                    (str(self.fuzzy_config.min_similarity),),
+                )
+                cursor.execute(
+                    statement,
+                    {
+                        "queries": queries,
+                        "patterns": patterns,
+                        "distance": self.fuzzy_config.max_distance,
+                    },
+                )
                 for row in cursor.fetchall():
                     rows_by_idx[row["idx"]].append(dict(row))
 
@@ -1269,28 +1426,30 @@ class PostgresLayer(DatabaseLayer):
         records = []
         for row in rows:
             row_dict = dict(row)
-            row_dict['source'] = 'postgres'
-            if isinstance(row_dict.get('embedding'), (bytes, memoryview)):
+            row_dict["source"] = "postgres"
+            if isinstance(row_dict.get("embedding"), (bytes, memoryview)):
                 import pickle
-                row_dict['embedding'] = pickle.loads(bytes(row_dict['embedding']))
+
+                row_dict["embedding"] = pickle.loads(bytes(row_dict["embedding"]))
             record = self.map_to_record(row_dict)
             records.append(record)
         return records
-    
+
     def write_cache(self, key: str, records: List[DatabaseRecord], ttl: int):
         pass
-    
-    def load_bulk(self, entities: List[DatabaseRecord], overwrite: bool = False, batch_size: int = 1000) -> int:
+
+    def load_bulk(
+        self, entities: List[DatabaseRecord], overwrite: bool = False, batch_size: int = 1000
+    ) -> int:
         """Bulk load to Postgres"""
         cursor = self.conn.cursor()
-        
+
         try:
             # Prepare entity data
             entity_values = [
-                (e.entity_id, e.label, e.description, e.entity_type, e.popularity)
-                for e in entities
+                (e.entity_id, e.label, e.description, e.entity_type, e.popularity) for e in entities
             ]
-            
+
             # Insert entities
             if overwrite:
                 entity_query = """
@@ -1316,42 +1475,39 @@ class PostgresLayer(DatabaseLayer):
                     VALUES (%s, %s, %s, %s, %s)
                     ON CONFLICT (entity_id) DO NOTHING
                 """
-            
+
             execute_batch(cursor, entity_query, entity_values, page_size=batch_size)
-            
+
             # Prepare alias data
             alias_values = []
             for entity in entities:
                 for alias in entity.aliases:
                     alias_values.append((entity.entity_id, alias))
-            
+
             # Delete old aliases if overwrite
             if overwrite and entities:
                 entity_ids = [e.entity_id for e in entities]
-                cursor.execute(
-                    "DELETE FROM aliases WHERE entity_id = ANY(%s)",
-                    (entity_ids,)
-                )
-            
+                cursor.execute("DELETE FROM aliases WHERE entity_id = ANY(%s)", (entity_ids,))
+
             # Insert aliases
             if alias_values:
                 execute_batch(
                     cursor,
                     "INSERT INTO aliases (entity_id, alias) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                     alias_values,
-                    page_size=batch_size
+                    page_size=batch_size,
                 )
-            
+
             self.conn.commit()
             return len(entities)
-        
+
         except Exception as e:
             self.conn.rollback()
             print(f"[ERROR Postgres] Load bulk failed: {e}")
             raise
         finally:
             cursor.close()
-    
+
     def clear(self):
         """Clear all data"""
         cursor = self.conn.cursor()
@@ -1363,7 +1519,7 @@ class PostgresLayer(DatabaseLayer):
             print(f"[ERROR Postgres] Clear error: {e}")
         finally:
             cursor.close()
-    
+
     def count(self) -> int:
         """Count entities"""
         cursor = self.conn.cursor()
@@ -1399,13 +1555,14 @@ class PostgresLayer(DatabaseLayer):
 
             for row in cursor.fetchall():
                 row_dict = dict(row)
-                row_dict['source'] = 'postgres'
+                row_dict["source"] = "postgres"
 
                 # Deserialize embedding from bytes if needed
-                if row_dict.get('embedding'):
+                if row_dict.get("embedding"):
                     import pickle
-                    if isinstance(row_dict['embedding'], (bytes, memoryview)):
-                        row_dict['embedding'] = pickle.loads(bytes(row_dict['embedding']))
+
+                    if isinstance(row_dict["embedding"], (bytes, memoryview)):
+                        row_dict["embedding"] = pickle.loads(bytes(row_dict["embedding"]))
 
                 record = self.map_to_record(row_dict)
                 entities.append(record)
@@ -1418,10 +1575,7 @@ class PostgresLayer(DatabaseLayer):
         return entities
 
     def update_embeddings(
-        self,
-        entity_ids: List[str],
-        embeddings: List[List[float]],
-        model_id: str
+        self, entity_ids: List[str], embeddings: List[List[float]], model_id: str
     ) -> int:
         """Update embeddings in PostgreSQL"""
         cursor = self.conn.cursor()
@@ -1440,7 +1594,7 @@ class PostgresLayer(DatabaseLayer):
                 cursor,
                 "UPDATE entities SET embedding = %s, embedding_model_id = %s WHERE entity_id = %s",
                 batch_data,
-                page_size=500
+                page_size=500,
             )
 
             self.conn.commit()
@@ -1465,14 +1619,14 @@ class PostgresLayer(DatabaseLayer):
 
 class DatabaseChainComponent(BaseComponent[L2Config]):
     """Multi-layer database chain component"""
-    
+
     def _setup(self):
         self.layers: List[DatabaseLayer] = []
-        
+
         for layer_config in self.config.layers:
             if isinstance(layer_config, dict):
                 layer_config = LayerConfig(**layer_config)
-            
+
             if layer_config.type == "dict":
                 layer = DictLayer(layer_config)
             elif layer_config.type == "redis":
@@ -1483,31 +1637,31 @@ class DatabaseChainComponent(BaseComponent[L2Config]):
                 layer = PostgresLayer(layer_config)
             else:
                 raise ValueError(f"Unknown layer type: {layer_config.type}")
-            
+
             self.layers.append(layer)
-        
+
         self.layers.sort(key=lambda x: x.priority, reverse=True)  # Higher priority checked first
-    
+
     def get_available_methods(self) -> List[str]:
         return [
             "search",
             "filter_by_popularity",
             "deduplicate_candidates",
             "limit_candidates",
-            "sort_by_popularity"
+            "sort_by_popularity",
         ]
-    
+
     def search(self, mention: str) -> List[DatabaseRecord]:
         """Search through layers with fallback"""
         found_in_layer = None
         results = []
-        
+
         for layer in self.layers:
             if not layer.is_available():
                 continue
-            
+
             layer_results = []
-            
+
             for mode in layer.config.search_mode:
                 if mode == "exact":
                     layer_results.extend(layer.search(mention))
@@ -1518,40 +1672,69 @@ class DatabaseChainComponent(BaseComponent[L2Config]):
                         layer_results.extend(layer.search_fuzzy(mention))
                         if layer_results:
                             break
-            
+
             if layer_results:
                 layer_results = self.deduplicate_candidates(layer_results)
                 results = layer_results
                 found_in_layer = layer
                 break
-        
+
         if results and found_in_layer:
             self._cache_write(mention, results, found_in_layer)
-        
+
         return results
 
     def search_many(self, mentions: List[str]) -> List[List[DatabaseRecord]]:
         """Search mentions in layer-priority order using native bulk APIs."""
+        return [retrieval.candidates for retrieval in self.search_many_detailed(mentions)]
+
+    def search_many_detailed(self, mentions: List[str]) -> List[MentionRetrieval]:
+        """Search mentions in layer-priority order, keeping failures explicit.
+
+        Layers are consulted in priority order exactly like search_many, but
+        a layer that raises (or reports a backend failure) no longer loses
+        the mention: the failure is attached to the mention and the next
+        layer still gets a chance. A cache-layer outage degrades to a
+        Postgres lookup instead of an exception, and a Postgres timeout
+        surfaces as backend_error instead of a silent miss.
+        """
         if not mentions:
             return []
 
-        results = [[] for _ in mentions]
+        results: List[MentionRetrieval] = [MentionRetrieval() for _ in mentions]
         pending = list(range(len(mentions)))
 
         for layer in self.layers:
             if not pending or not layer.is_available():
                 continue
 
-            layer_results = layer.search_many([mentions[index] for index in pending])
+            try:
+                layer_out = layer.search_many_detailed([mentions[index] for index in pending])
+            except Exception as e:
+                print(f"[ERROR L2] {type(layer).__name__} search_many failed: {e}")
+                for index in pending:
+                    results[index].failures.append(
+                        RetrievalFailure(
+                            layer=type(layer).__name__,
+                            phase="availability",
+                            kind=_classify_retrieval_error(e),
+                            message=str(e),
+                        )
+                    )
+                continue
+
             next_pending = []
             cache_entries = []
             for position, index in enumerate(pending):
-                candidates = layer_results[position] if position < len(layer_results) else []
-                candidates = self.deduplicate_candidates(candidates)
+                retrieval = layer_out[position] if position < len(layer_out) else MentionRetrieval()
+                candidates = self.deduplicate_candidates(retrieval.candidates)
                 if candidates:
-                    results[index] = candidates
+                    # A hit from this layer resolves the mention, superseding
+                    # any failure reported by an earlier (cache) layer.
+                    results[index] = MentionRetrieval(candidates=candidates)
                     cache_entries.append((mentions[index], candidates))
                 else:
+                    results[index].failures.extend(retrieval.failures)
                     next_pending.append(index)
             self._cache_write_many(cache_entries, layer)
             pending = next_pending
@@ -1574,7 +1757,7 @@ class DatabaseChainComponent(BaseComponent[L2Config]):
             else:
                 for query, results in entries:
                     self._cache_write_to_layer(query, results, layer)
-    
+
     def batch_search(self, mentions: List[str]) -> List[List[DatabaseRecord]]:
         """Compatibility alias with per-mention fallback and cache writeback."""
         return self.search_many(mentions)
@@ -1590,9 +1773,7 @@ class DatabaseChainComponent(BaseComponent[L2Config]):
             self._cache_write_to_layer(query, results, layer)
 
     @staticmethod
-    def _cache_write_to_layer(
-        query: str, results: List[DatabaseRecord], layer: DatabaseLayer
-    ):
+    def _cache_write_to_layer(query: str, results: List[DatabaseRecord], layer: DatabaseLayer):
         if layer.cache_policy == "always":
             layer.write_cache(query, results, layer.ttl)
         elif layer.cache_policy == "miss":
@@ -1603,11 +1784,13 @@ class DatabaseChainComponent(BaseComponent[L2Config]):
             existing = layer.search(query)
             if existing:
                 layer.write_cache(query, results, layer.ttl)
-    
-    def filter_by_popularity(self, records: List[DatabaseRecord], min_popularity: int = None) -> List[DatabaseRecord]:
+
+    def filter_by_popularity(
+        self, records: List[DatabaseRecord], min_popularity: int = None
+    ) -> List[DatabaseRecord]:
         threshold = min_popularity if min_popularity is not None else self.config.min_popularity
         return [r for r in records if r.popularity >= threshold]
-    
+
     def deduplicate_candidates(self, records: List[DatabaseRecord]) -> List[DatabaseRecord]:
         seen = set()
         unique = []
@@ -1616,20 +1799,22 @@ class DatabaseChainComponent(BaseComponent[L2Config]):
                 unique.append(record)
                 seen.add(record.entity_id)
         return unique
-    
-    def limit_candidates(self, records: List[DatabaseRecord], limit: int = None) -> List[DatabaseRecord]:
+
+    def limit_candidates(
+        self, records: List[DatabaseRecord], limit: int = None
+    ) -> List[DatabaseRecord]:
         max_cands = limit if limit is not None else self.config.max_candidates
         return records[:max_cands]
-    
+
     def sort_by_popularity(self, records: List[DatabaseRecord]) -> List[DatabaseRecord]:
         return sorted(records, key=lambda x: x.popularity, reverse=True)
-    
+
     def load_entities(
         self,
         source: Union[str, Path, List[Dict[str, Any]], Dict[str, Dict[str, Any]]],
         target_layers: List[str] = None,
         batch_size: int = 1000,
-        overwrite: bool = False
+        overwrite: bool = False,
     ) -> Dict[str, int]:
         """
         Load entities from JSONL file, list of dicts, or dict.
@@ -1658,10 +1843,7 @@ class DatabaseChainComponent(BaseComponent[L2Config]):
                 for eid, data in source.items()
             ]
         elif isinstance(source, list):
-            entities = [
-                DatabaseRecord(**e) if isinstance(e, dict) else e
-                for e in source
-            ]
+            entities = [DatabaseRecord(**e) if isinstance(e, dict) else e for e in source]
         else:
             raise TypeError(f"Expected file path, list, or dict; got {type(source)}")
 
@@ -1713,7 +1895,7 @@ class DatabaseChainComponent(BaseComponent[L2Config]):
     def _parse_jsonl(filepath: Union[str, Path]) -> List[DatabaseRecord]:
         """Parse JSONL file into DatabaseRecord list."""
         entities = []
-        with open(filepath, 'r', encoding='utf-8') as f:
+        with open(filepath, "r", encoding="utf-8") as f:
             for line_num, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
@@ -1725,17 +1907,17 @@ class DatabaseChainComponent(BaseComponent[L2Config]):
                     print(f"[WARN] Line {line_num} parse error: {e}")
                     continue
         return entities
-    
+
     def clear_layers(self, layer_names: List[str] = None):
         """Clear all entities in specified layers"""
         for layer in self.layers:
             if layer_names and layer.config.type not in layer_names:
                 continue
-            
+
             print(f"Clearing {layer.config.type}...")
             layer.clear()
             print(f"✓ Cleared")
-    
+
     def get_all_entities(self) -> List[DatabaseRecord]:
         """Get all entities from all available layers (deduplicated)"""
         all_entities = []
@@ -1757,7 +1939,7 @@ class DatabaseChainComponent(BaseComponent[L2Config]):
         template: str,
         model_id: str,
         target_layers: List[str] = None,
-        batch_size: int = 32
+        batch_size: int = 32,
     ) -> Dict[str, int]:
         """
         Precompute embeddings for all entities in specified layers.
@@ -1809,13 +1991,13 @@ class DatabaseChainComponent(BaseComponent[L2Config]):
             # Encode in batches
             all_embeddings = []
             for i in tqdm(range(0, len(labels), batch_size), desc="Encoding"):
-                batch_labels = labels[i:i + batch_size]
+                batch_labels = labels[i : i + batch_size]
                 batch_embeddings = encoder_fn(batch_labels)
 
                 # Convert to list if tensor
-                if hasattr(batch_embeddings, 'tolist'):
+                if hasattr(batch_embeddings, "tolist"):
                     batch_embeddings = batch_embeddings.tolist()
-                elif hasattr(batch_embeddings, 'cpu'):
+                elif hasattr(batch_embeddings, "cpu"):
                     batch_embeddings = batch_embeddings.cpu().numpy().tolist()
 
                 all_embeddings.extend(batch_embeddings)

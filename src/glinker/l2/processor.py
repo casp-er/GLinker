@@ -1,8 +1,8 @@
 from typing import Any, List, Union
 from glinker.core.base import BaseProcessor
 from glinker.core.registry import processor_registry
-from .models import L2Config, L2Input, L2Output, DatabaseRecord
-from .component import DatabaseChainComponent
+from .models import L2Config, L2Input, L2Output, DatabaseRecord, RetrievalFailure
+from .component import DatabaseChainComponent, _classify_retrieval_error
 
 
 class L2Processor(BaseProcessor[L2Config, L2Input, L2Output]):
@@ -12,24 +12,21 @@ class L2Processor(BaseProcessor[L2Config, L2Input, L2Output]):
         self,
         config: L2Config,
         component: DatabaseChainComponent,
-        pipeline: list[tuple[str, dict[str, Any]]] = None
+        pipeline: list[tuple[str, dict[str, Any]]] = None,
     ):
         super().__init__(config, component, pipeline)
         self.schema = {}  # Will be set by DAG executor from node config
 
     def format_label(self, record: DatabaseRecord) -> str:
         """Format label using schema template"""
-        template = self.schema.get('template', '{label}')
+        template = self.schema.get("template", "{label}")
         try:
             return template.format(**record.model_dump())
         except KeyError:
             return record.label
 
     def precompute_embeddings(
-        self,
-        encoder_fn,
-        target_layers: List[str] = None,
-        batch_size: int = 32
+        self, encoder_fn, target_layers: List[str] = None, batch_size: int = 32
     ):
         """
         Precompute embeddings for entities using schema template.
@@ -39,17 +36,17 @@ class L2Processor(BaseProcessor[L2Config, L2Input, L2Output]):
             target_layers: Layer types to update
             batch_size: Batch size for encoding
         """
-        template = self.schema.get('template', '{label}')
-        model_id = self.config.embeddings.model_name if self.config.embeddings else 'unknown'
+        template = self.schema.get("template", "{label}")
+        model_id = self.config.embeddings.model_name if self.config.embeddings else "unknown"
 
         return self.component.precompute_embeddings(
             encoder_fn=encoder_fn,
             template=template,
             model_id=model_id,
             target_layers=target_layers,
-            batch_size=batch_size
+            batch_size=batch_size,
         )
-    
+
     def _default_pipeline(self) -> list[tuple[str, dict[str, Any]]]:
         return [
             ("search", {}),
@@ -58,13 +55,13 @@ class L2Processor(BaseProcessor[L2Config, L2Input, L2Output]):
             ("sort_by_popularity", {}),
             ("limit_candidates", {}),
         ]
-    
+
     def __call__(
         self,
         mentions: Union[List[str], List[List[Any]], L2Input] = None,
         texts: List[str] = None,
         structure: List[List[str]] = None,
-        input_data: L2Input = None
+        input_data: L2Input = None,
     ) -> L2Output:
         """
         Process mentions and return candidates
@@ -97,62 +94,92 @@ class L2Processor(BaseProcessor[L2Config, L2Input, L2Output]):
                 for text_entities in mentions
             ]
             flat_mentions = self._flatten(mention_groups)
-            flat_candidates = self._execute_pipeline_many(flat_mentions)
+            flat_candidates, flat_failures = self._execute_pipeline_many_detailed(flat_mentions)
             all_candidates = []
+            all_failures = []
             offset = 0
             for mention_group in mention_groups:
                 group_candidates = []
+                group_failures = []
                 for _ in mention_group:
                     group_candidates.extend(flat_candidates[offset])
+                    group_failures.extend(flat_failures[offset])
                     offset += 1
                 all_candidates.append(group_candidates)
-            
-            return L2Output(candidates=all_candidates)
-        
+                all_failures.append(group_failures)
+
+            return L2Output(candidates=all_candidates, retrieval_failures=all_failures)
+
         # Flat structure: ["mention1", "mention2", ...]
         else:
             mention_texts = [self._extract_mention_text(mention) for mention in mentions]
-            all_candidates = self._execute_pipeline_many(mention_texts)
-            
+            all_candidates, all_failures = self._execute_pipeline_many_detailed(mention_texts)
+
             if structure:
                 grouped = self._group_by_structure(all_candidates, structure)
+                grouped_failures = self._group_by_structure(all_failures, structure)
             else:
                 # Flatten all into one group
                 grouped = [self._flatten(all_candidates)]
-            
-            return L2Output(candidates=grouped)
+                grouped_failures = [self._flatten(all_failures)]
+
+            return L2Output(candidates=grouped, retrieval_failures=grouped_failures)
 
     def _execute_pipeline_many(self, mentions: List[str]) -> List[List[DatabaseRecord]]:
         """Execute the search pipeline in one batch when it starts with search."""
+        candidates, _ = self._execute_pipeline_many_detailed(mentions)
+        return candidates
+
+    def _execute_pipeline_many_detailed(
+        self, mentions: List[str]
+    ) -> tuple[List[List[DatabaseRecord]], List[List[RetrievalFailure]]]:
+        """Run the search pipeline, returning per-mention candidates and failures."""
         if not mentions:
-            return []
+            return [], []
 
         if not self.pipeline or self.pipeline[0][0] != "search":
-            return [self._execute_pipeline(mention, self.pipeline) for mention in mentions]
+            candidates = []
+            failures = []
+            for mention in mentions:
+                try:
+                    candidates.append(self._execute_pipeline(mention, self.pipeline))
+                    failures.append([])
+                except Exception as e:
+                    candidates.append([])
+                    failures.append(
+                        [
+                            RetrievalFailure(
+                                layer=type(self.component).__name__,
+                                phase="availability",
+                                kind=_classify_retrieval_error(e),
+                                message=str(e),
+                            )
+                        ]
+                    )
+            return candidates, failures
 
-        results = self.component.search_many(mentions)
-        for index, records in enumerate(results):
-            result = records
+        detailed = self.component.search_many_detailed(mentions)
+        results = []
+        for retrieval in detailed:
+            result = retrieval.candidates
             for method_name, kwargs in self.pipeline[1:]:
                 result = self._execute_pipeline_step(result, method_name, kwargs)
-            results[index] = result
-        return results
-    
+            results.append(result)
+        return results, [retrieval.failures for retrieval in detailed]
+
     def _extract_mention_text(self, mention: Any) -> str:
         """Extract text string from mention (can be L1Entity, dict, or str)"""
         if isinstance(mention, str):
             return mention
-        elif hasattr(mention, 'text'):
+        elif hasattr(mention, "text"):
             return mention.text
         elif isinstance(mention, dict):
-            return mention.get('text', str(mention))
+            return mention.get("text", str(mention))
         else:
             return str(mention)
-    
+
     def _group_by_structure(
-        self,
-        all_candidates: List[List[DatabaseRecord]],
-        structure: List[List[str]]
+        self, all_candidates: List[List[DatabaseRecord]], structure: List[List[str]]
     ) -> List[List[DatabaseRecord]]:
         """Group candidates according to structure"""
         grouped = []
@@ -165,7 +192,7 @@ class L2Processor(BaseProcessor[L2Config, L2Input, L2Output]):
                     idx += 1
             grouped.append(text_candidates)
         return grouped
-    
+
     def _flatten(self, nested: List[List[Any]]) -> List[Any]:
         """Flatten nested list"""
         flat = []

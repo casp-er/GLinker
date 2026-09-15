@@ -8,6 +8,7 @@ import pytest
 def create_processor(processor_name, config_dict):
     """Helper to create processor from registry."""
     from glinker.core.registry import processor_registry
+
     factory = processor_registry.get(processor_name)
     return factory(config_dict=config_dict, pipeline=None)
 
@@ -21,12 +22,12 @@ class TestL2ProcessorCreation:
 
     def test_processor_has_component(self, l2_config_dict):
         processor = create_processor("l2_chain", l2_config_dict)
-        assert hasattr(processor, 'component')
+        assert hasattr(processor, "component")
         assert processor.component is not None
 
     def test_processor_has_schema(self, l2_config_dict):
         processor = create_processor("l2_chain", l2_config_dict)
-        assert hasattr(processor, 'schema')
+        assert hasattr(processor, "schema")
 
 
 class TestL2ProcessorFormatLabel:
@@ -38,11 +39,7 @@ class TestL2ProcessorFormatLabel:
         processor = create_processor("l2_chain", l2_config_dict)
         processor.schema = {"template": "{label}"}
 
-        record = DatabaseRecord(
-            entity_id="test",
-            label="TP53",
-            description="Tumor protein"
-        )
+        record = DatabaseRecord(entity_id="test", label="TP53", description="Tumor protein")
 
         formatted = processor.format_label(record)
         assert formatted == "TP53"
@@ -53,11 +50,7 @@ class TestL2ProcessorFormatLabel:
         processor = create_processor("l2_chain", l2_config_dict)
         processor.schema = {"template": "{label}: {description}"}
 
-        record = DatabaseRecord(
-            entity_id="test",
-            label="TP53",
-            description="Tumor protein p53"
-        )
+        record = DatabaseRecord(entity_id="test", label="TP53", description="Tumor protein p53")
 
         formatted = processor.format_label(record)
         assert formatted == "TP53: Tumor protein p53"
@@ -90,7 +83,7 @@ class TestL2ProcessorCall:
                 description=e["description"],
                 entity_type=e["entity_type"],
                 popularity=e["popularity"],
-                aliases=e["aliases"]
+                aliases=e["aliases"],
             )
             for e in sample_entities
         ]
@@ -98,10 +91,8 @@ class TestL2ProcessorCall:
 
         # Call with mentions
         from glinker.l1.models import L1Entity
-        mentions = [[
-            L1Entity(text="TP53", start=0, end=4,
-                     left_context="", right_context="")
-        ]]
+
+        mentions = [[L1Entity(text="TP53", start=0, end=4, left_context="", right_context="")]]
 
         result = processor(mentions=mentions)
 
@@ -138,12 +129,41 @@ class TestL2ProcessorCall:
 
         with patch.object(
             processor.component,
-            "search_many",
-            wraps=processor.component.search_many,
-        ) as search_many:
+            "search_many_detailed",
+            wraps=processor.component.search_many_detailed,
+        ) as search_many_detailed:
             processor(mentions=["TP53", "BRCA1"])
 
-        search_many.assert_called_once_with(["TP53", "BRCA1"])
+        search_many_detailed.assert_called_once_with(["TP53", "BRCA1"])
+
+    def test_call_reports_retrieval_failures(self, l2_config_dict):
+        from glinker.l1.models import L1Entity
+
+        processor = create_processor("l2_chain", l2_config_dict)
+        from unittest.mock import patch
+
+        from glinker.l2.models import MentionRetrieval, RetrievalFailure
+
+        timeout_failure = RetrievalFailure(
+            layer="PostgresLayer", phase="direct", kind="timeout", message="canceled"
+        )
+        hit = MentionRetrieval()
+        miss = MentionRetrieval(failures=[timeout_failure])
+        with patch.object(
+            processor.component,
+            "search_many_detailed",
+            return_value=[hit, miss],
+        ):
+            result = processor(
+                mentions=[
+                    [L1Entity(text="TP53", start=0, end=4, left_context="", right_context="")],
+                    [L1Entity(text="ZZZ", start=0, end=3, left_context="", right_context="")],
+                ]
+            )
+
+        assert len(result.retrieval_failures) == len(result.candidates) == 2
+        assert result.retrieval_failures[0] == []
+        assert result.retrieval_failures[1] == [timeout_failure]
 
 
 class TestL2ProcessorPrecompute:
@@ -151,4 +171,4 @@ class TestL2ProcessorPrecompute:
 
     def test_precompute_method_exists(self, l2_config_dict):
         processor = create_processor("l2_chain", l2_config_dict)
-        assert hasattr(processor, 'precompute_embeddings')
+        assert hasattr(processor, "precompute_embeddings")

@@ -93,11 +93,13 @@ def test_word_boundaries_and_edit_distance_reject_popular_noise(pg):
 
 
 def test_search_many_matches_sequential_search_and_search_fuzzy(pg):
-    pg.load_bulk([
-        DatabaseRecord(entity_id="Q1", label="Straße São Ｐａｕｌｏ", popularity=5),
-        DatabaseRecord(entity_id="Q2", label="Deliverance", aliases=["Acre"], popularity=1),
-        DatabaseRecord(entity_id="Q3", label="trance", description="massacre", popularity=1000),
-    ])
+    pg.load_bulk(
+        [
+            DatabaseRecord(entity_id="Q1", label="Straße São Ｐａｕｌｏ", popularity=5),
+            DatabaseRecord(entity_id="Q2", label="Deliverance", aliases=["Acre"], popularity=1),
+            DatabaseRecord(entity_id="Q3", label="trance", description="massacre", popularity=1000),
+        ]
+    )
 
     mentions = ["STRASSE SAO Paulo", "Acre", "Delivrance", "no such entity", "Acre"]
     batched = pg.search_many(mentions)
@@ -150,10 +152,9 @@ class _CursorCountingConn:
 
 
 def test_search_many_uses_a_constant_number_of_round_trips(pg):
-    pg.load_bulk([
-        DatabaseRecord(entity_id=f"Q{i}", label=f"Entity{i}", popularity=i)
-        for i in range(20)
-    ])
+    pg.load_bulk(
+        [DatabaseRecord(entity_id=f"Q{i}", label=f"Entity{i}", popularity=i) for i in range(20)]
+    )
     mentions = [f"Entity{i}" for i in range(20)]
 
     spy = _CursorCountingConn(pg.conn)
@@ -161,6 +162,50 @@ def test_search_many_uses_a_constant_number_of_round_trips(pg):
     pg.search_many(mentions)
     # Bounded by mention count is what we're fixing away from: 20 mentions
     # should not need anywhere near 20 cursor()-openings. Normalize (1) +
-    # exact batch (1) is 2; nothing here should need fuzzy fallback since
-    # every mention is an exact label match.
-    assert spy.call_count <= 4
+    # equality chunks (ceil(20 / (timeout_ms // _ASSUMED_MS_PER_MENTION))
+    # = ceil(20 / 5) = 4) is 5; nothing here needs the phrase or fuzzy
+    # phases since every mention is an exact label match.
+    assert spy.call_count <= 6
+
+
+def test_direct_equality_resolves_short_aliases_before_trigram_scan(pg):
+    pg.load_bulk(
+        [
+            DatabaseRecord(
+                entity_id="Qfinancialtimes",
+                label="Financial Times",
+                aliases=["FT"],
+                popularity=900,
+            ),
+            DatabaseRecord(
+                entity_id="Qfoot",
+                label="Foot",
+                aliases=["ft"],
+                popularity=10,
+            ),
+        ]
+    )
+
+    # "ft" is below the trigram minimum, so only the equality pass runs;
+    # both alias matches must come back, more popular first.
+    results = pg.search_many(["FT"])
+    assert [r.entity_id for r in results[0]] == [
+        "Qfinancialtimes",
+        "Qfoot",
+    ]
+
+    detailed = pg.search_many_detailed(["FT"])
+    assert detailed[0].status == "matched"
+
+
+def test_search_many_detailed_reports_closed_backend_as_failure(pg):
+    pg.load_bulk([DatabaseRecord(entity_id="Q1", label="Findable")])
+    pg.conn.close()
+
+    detailed = pg.search_many_detailed(["findable"])
+
+    assert detailed[0].status == "backend_error"
+    assert detailed[0].failures
+    assert all(failure.layer == "PostgresLayer" for failure in detailed[0].failures)
+    # Candidate view keeps its shape; the failure distinction is the point.
+    assert pg.search_many(["findable"]) == [[]]
