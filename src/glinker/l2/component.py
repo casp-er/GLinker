@@ -1377,45 +1377,26 @@ class PostgresLayer(DatabaseLayer):
         if not fuzzy:
             search_fields.append(("entities", "description_folded", 1.0))
         for table, field, weight in search_fields:
-            # Each branch must return a BOUNDED top-k: the ranking CTE below
-            # keeps only the best 50 per mention anyway, and an unbounded
-            # scan that collects every trigram/Levenshtein match for a common
-            # word makes the whole statement blow its statement_timeout on a
-            # cold KB. Fuzzy keeps the most similar rows; phrase keeps the
-            # most popular ones (its branch score is a constant weight), so
-            # the global popularity-aware ranking still sees them.
+            # Every branch is bounded by the trigram GiST KNN ordering:
+            # LIMIT 100 with a heap-ordered alternative (similarity() or
+            # popularity) still fetches every index-matched row for common
+            # words — hundreds of thousands on the production KB — and
+            # blows the statement timeout. <-> walks the index
+            # nearest-first and stops at the limit; the regex/similarity
+            # predicate rides along as a recheck. The branch scores stay
+            # constant per phase, and the global ranking CTE re-orders by
+            # score and entity popularity afterwards.
             qualified = f"t.{field}"
             if fuzzy:
-                # Top-k via the trigram GiST KNN ordering: LIMIT 100 with a
-                # computed ORDER BY similarity(...) still evaluates every
-                # index-matched row (a common word matches hundreds of
-                # thousands of aliases on the production KB, blowing the
-                # statement timeout), while <-> walks the index
-                # nearest-first and stops after the limit.
-                branches.append(
-                    f"(SELECT t.entity_id, {weight} * (1 - ({qualified} <-> i.query)) AS score "
-                    f"FROM {table} t "
-                    f"WHERE {predicate.format(field=qualified)} "
-                    f"ORDER BY {qualified} <-> i.query LIMIT 100)"
-                )
-            elif table == "entities":
-                branches.append(
-                    f"(SELECT t.entity_id, {weight} * {score.format(field=qualified)} AS score "
-                    f"FROM entities t "
-                    f"WHERE {predicate.format(field=qualified)} "
-                    f"ORDER BY t.popularity DESC LIMIT 100)"
-                )
+                score_expr = f"{weight} * (1 - ({qualified} <-> i.query))"
             else:
-                # aliases has no popularity column: rank by the linked entity's.
-                branches.append(
-                    f"(SELECT s.entity_id, s.score FROM ("
-                    f"SELECT t.entity_id, {weight} * {score.format(field=qualified)} AS score, "
-                    f"e.popularity AS pop "
-                    f"FROM aliases t LEFT JOIN entities e ON e.entity_id = t.entity_id "
-                    f"WHERE {predicate.format(field=qualified)} "
-                    f"ORDER BY e.popularity DESC LIMIT 100"
-                    f") s)"
-                )
+                score_expr = f"{weight} * {score.format(field=qualified)}"
+            branches.append(
+                f"(SELECT t.entity_id, {score_expr} AS score "
+                f"FROM {table} t "
+                f"WHERE {predicate.format(field=qualified)} "
+                f"ORDER BY {qualified} <-> i.query LIMIT 100)"
+            )
         matches_lateral = " UNION ALL ".join(branches)
 
         statement = """
