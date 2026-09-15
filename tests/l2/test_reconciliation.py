@@ -228,6 +228,49 @@ def test_postgres_search_many_detailed_reports_backend_failure():
     assert layer.search_many(["One", "two"]) == [[one], []]
 
 
+def test_postgres_breaker_skips_poison_queries_after_repeated_timeouts():
+    with patch.object(PostgresLayer, "_setup", return_value=None):
+        layer = PostgresLayer(
+            LayerConfig(
+                type="postgres",
+                priority=0,
+                search_mode=["exact", "fuzzy"],
+                config={"dsn": "service=test"},
+            )
+        )
+    one = DatabaseRecord(entity_id="Q1", label="one")
+    timeout_failure = RetrievalFailure(
+        layer="PostgresLayer", phase="phrase", kind="timeout", message="canceled"
+    )
+    layer._normalize_many = MagicMock(return_value=["poison", "fine"])
+    layer._batch_retrieve_direct_chunked = MagicMock(return_value=([[], []], {}))
+
+    def phrase_always_times_out(queries, fuzzy, phase=None):
+        return (
+            [[] for _ in queries],
+            {i: timeout_failure for i in range(len(queries)) if queries[i] == "poison"},
+        )
+
+    layer._batch_retrieve_chunked = MagicMock(side_effect=phrase_always_times_out)
+
+    for _ in range(PostgresLayer._BREAKER_THRESHOLD):
+        detailed = layer.search_many_detailed(["Poison", "Fine"])
+        assert detailed[0].status == "backend_error"
+        assert detailed[1].status == "not_found"
+
+    # The breaker now skips the poison query's expensive phases while
+    # "fine" — which never timed out — is still searched normally.
+    layer._batch_retrieve_chunked = MagicMock(
+        return_value=([[DatabaseRecord(entity_id="Q2", label="fine result")]], {})
+    )
+    layer._batch_retrieve_chunked.reset_mock()
+    detailed = layer.search_many_detailed(["Poison", "Fine"])
+    assert detailed[0].status == "not_found"
+    assert detailed[1].status == "matched"
+    for call in layer._batch_retrieve_chunked.call_args_list:
+        assert "poison" not in call.args[0]
+
+
 def test_postgres_normalize_failure_is_backend_error_not_miss():
     with patch.object(PostgresLayer, "_setup", return_value=None):
         layer = PostgresLayer(

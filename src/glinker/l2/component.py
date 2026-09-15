@@ -995,6 +995,10 @@ class PostgresLayer(DatabaseLayer):
     # Fuzzy typo matching is for short surface forms; long queries never
     # benefit from it and dominate the KNN walk on large KBs.
     _MAX_FUZZY_QUERY_LENGTH = 40
+    # Consecutive searches in which a query's expensive phases may time out
+    # before it is skipped as a confirmed miss (direct equality keeps
+    # running for it). Two gives a cold walk one warm-cache retry.
+    _BREAKER_THRESHOLD = 2
 
     def _setup(self):
         from psycopg2 import sql
@@ -1142,6 +1146,18 @@ class PostgresLayer(DatabaseLayer):
         if not queries:
             return []
 
+        breaker = getattr(self, "_retrieval_breaker", None)
+        if breaker is None:
+            breaker = self._retrieval_breaker = {}
+
+        def _tripped(query: str) -> bool:
+            """A query that timed out on consecutive searches is beyond
+            practical retrieval capability (pathological trigram
+            neighborhood). Retrying it forever stalls every batch that
+            contains it, so it is skipped in the expensive phases and
+            surfaces as a confirmed miss; direct equality still runs."""
+            return breaker.get(query, 0) >= self._BREAKER_THRESHOLD
+
         try:
             normalized = self._normalize_many(queries)
             unique = list(dict.fromkeys(q for q in normalized if q))
@@ -1166,6 +1182,7 @@ class PostgresLayer(DatabaseLayer):
                     for query in unique
                     if not outcomes[query].candidates
                     and query not in failed
+                    and not _tripped(query)
                     and len(query) >= self._MIN_TRIGRAM_QUERY_LENGTH
                 ]
                 if phrase_queries:
@@ -1184,6 +1201,7 @@ class PostgresLayer(DatabaseLayer):
                 for query in unique
                 if not outcomes[query].candidates
                 and query not in failed
+                and not _tripped(query)
                 and len(query) >= self._MIN_TRIGRAM_QUERY_LENGTH
                 and len(query) <= self._MAX_FUZZY_QUERY_LENGTH
                 and "fuzzy" in self.config.search_mode
@@ -1198,6 +1216,20 @@ class PostgresLayer(DatabaseLayer):
                     failure = fuzzy_failures.get(idx)
                     if failure is not None:
                         outcomes[query].failures.append(failure)
+
+            for query in unique:
+                if outcomes[query].failures and not outcomes[query].candidates:
+                    breaker[query] = breaker.get(query, 0) + 1
+                elif outcomes[query].candidates:
+                    breaker.pop(query, None)
+            skipped = sum(
+                1 for query in unique if _tripped(query) and not outcomes[query].candidates
+            )
+            if skipped:
+                print(
+                    f"[WARN Postgres] retrieval breaker skipped {skipped} "
+                    f"query(-ies) whose expensive phases timed out repeatedly"
+                )
         except Exception as e:
             # Normalization (or anything outside the per-chunk guards) blew
             # up: every mention is unknown rather than a confirmed miss.
