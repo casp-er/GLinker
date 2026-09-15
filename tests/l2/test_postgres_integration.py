@@ -185,7 +185,6 @@ def test_direct_equality_resolves_short_aliases_before_trigram_scan(pg):
             ),
         ]
     )
-
     # "ft" is below the trigram minimum, so only the equality pass runs;
     # both alias matches must come back, more popular first.
     results = pg.search_many(["FT"])
@@ -196,6 +195,49 @@ def test_direct_equality_resolves_short_aliases_before_trigram_scan(pg):
 
     detailed = pg.search_many_detailed(["FT"])
     assert detailed[0].status == "matched"
+
+
+def test_bounded_branches_survive_common_word_noise(pg):
+    """A query word shared by a large noise corpus must not blow up.
+
+    Branches return bounded top-k (LIMIT 100), so the ranking CTE never has
+    to collect every trigram/word-boundary match for a common word.
+    """
+    pg.load_bulk(
+        [
+            DatabaseRecord(
+                entity_id=f"phrase-noise-{i}",
+                label=f"Fire Drill Manual {i}",
+                popularity=1,
+            )
+            for i in range(300)
+        ]
+        + [
+            DatabaseRecord(
+                entity_id=f"fuzzy-noise-{i}",
+                label=f"Fired{i}",
+                popularity=1,
+            )
+            for i in range(200)
+        ]
+        + [
+            DatabaseRecord(
+                entity_id="target",
+                label="Fire Department",
+                popularity=1000,
+            )
+        ]
+    )
+
+    phrase_results = pg.search_many(["fire"])[0]
+    target_rank = [r.entity_id for r in phrase_results].index("target")
+    assert target_rank == 0  # popularity-aware branch keeps the popular hit
+    assert len(phrase_results) <= 50  # global ranking cap still applies
+
+    fuzzy_results = pg.search_fuzzy("fired")
+    assert fuzzy_results  # bounded collection still finds fuzzy matches
+    assert len(fuzzy_results) <= 50
+
 
 
 def test_search_many_detailed_reports_closed_backend_as_failure(pg):

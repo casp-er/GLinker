@@ -1366,10 +1366,39 @@ class PostgresLayer(DatabaseLayer):
         if not fuzzy:
             search_fields.append(("entities", "description_folded", 1.0))
         for table, field, weight in search_fields:
-            branches.append(
-                f"SELECT entity_id, {weight} * {score.format(field=field)} AS score "
-                f"FROM {table} WHERE {predicate.format(field=field)}"
-            )
+            # Each branch must return a BOUNDED top-k: the ranking CTE below
+            # keeps only the best 50 per mention anyway, and an unbounded
+            # scan that collects every trigram/Levenshtein match for a common
+            # word makes the whole statement blow its statement_timeout on a
+            # cold KB. Fuzzy keeps the most similar rows; phrase keeps the
+            # most popular ones (its branch score is a constant weight), so
+            # the global popularity-aware ranking still sees them.
+            qualified = f"t.{field}"
+            if fuzzy:
+                branches.append(
+                    f"(SELECT t.entity_id, {weight} * similarity({qualified}, i.query) AS score "
+                    f"FROM {table} t "
+                    f"WHERE {predicate.format(field=qualified)} "
+                    f"ORDER BY score DESC LIMIT 100)"
+                )
+            elif table == "entities":
+                branches.append(
+                    f"(SELECT t.entity_id, {weight} * {score.format(field=qualified)} AS score "
+                    f"FROM entities t "
+                    f"WHERE {predicate.format(field=qualified)} "
+                    f"ORDER BY t.popularity DESC LIMIT 100)"
+                )
+            else:
+                # aliases has no popularity column: rank by the linked entity's.
+                branches.append(
+                    f"(SELECT s.entity_id, s.score FROM ("
+                    f"SELECT t.entity_id, {weight} * {score.format(field=qualified)} AS score, "
+                    f"e.popularity AS pop "
+                    f"FROM aliases t LEFT JOIN entities e ON e.entity_id = t.entity_id "
+                    f"WHERE {predicate.format(field=qualified)} "
+                    f"ORDER BY e.popularity DESC LIMIT 100"
+                    f") s)"
+                )
         matches_lateral = " UNION ALL ".join(branches)
 
         statement = """
