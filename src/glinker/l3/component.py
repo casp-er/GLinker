@@ -96,8 +96,10 @@ class L3Component(BaseComponent[L3Config]):
             flat_ner=self.config.flat_ner,
             multi_label=self.config.multi_label,
         )
-        if input_spans is not None:
-            kwargs["input_spans"] = input_spans
+        # batch_predict_with_embeds (unlike predict_entities/inference) has a
+        # strict signature with no **kwargs catch-all in the installed gliner
+        # release, so input_spans can't be forwarded on this path — it's only
+        # honored via the predict_entities fallback above.
 
         entities = self.model.predict_with_embeds(
             text,
