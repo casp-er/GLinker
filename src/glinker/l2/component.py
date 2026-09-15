@@ -1290,7 +1290,14 @@ class PostgresLayer(DatabaseLayer):
         return results, failures
 
     def _batch_retrieve_direct(self, queries: List[str]) -> List[List[DatabaseRecord]]:
-        """Resolve exact label/alias equality matches without broad text scans."""
+        """Resolve exact label/alias equality matches without broad text scans.
+
+        Equality is expressed as BETWEEN x AND x: the planner refuses to
+        use the precise B-tree for `=` once the lossy GiST trigram index
+        exists (it underestimates the recheck cost and times out on short
+        queries), while a range condition is outside GiST's operator set,
+        so the B-tree always wins it.
+        """
         statement = """
             WITH input AS (
                 SELECT * FROM unnest(%(queries)s::text[])
@@ -1300,10 +1307,10 @@ class PostgresLayer(DatabaseLayer):
                 SELECT i.idx, m.entity_id, m.score
                 FROM input i, LATERAL (
                     SELECT entity_id, 2.0 AS score
-                    FROM entities WHERE label_folded = i.query
+                    FROM entities WHERE label_folded BETWEEN i.query AND i.query
                     UNION ALL
                     SELECT entity_id, 1.5 AS score
-                    FROM aliases WHERE alias_folded = i.query
+                    FROM aliases WHERE alias_folded BETWEEN i.query AND i.query
                 ) m
             ),
             ranked AS (
