@@ -241,3 +241,53 @@ Postgres DSN/credential preservation and Redis password forwarding. L0 and
 L3 regression tests cover punctuation-ending aliases and per-mention
 popularity normalization respectively. No L3 models were downloaded or
 inference run for these tests.
+
+## Staged retrieval, bounded KNN, and the breaker, 2026-09-16
+
+Production tuning against the 4.2 GB KB (5.97M entities, 12.3M aliases)
+reshaped retrieval once more; the measured facts that forced it:
+
+- Direct label/alias equality must ride precise B-tree indexes
+  (`entities_label_btree`, `aliases_alias_btree`). Once GiST trgm indexes
+  exist, the planner prefers them for `=` (lossy superset rechecks on short
+  queries — "us" matched millions of alias trigram rows — blew the statement
+  timeout), and it does so even after `ANALYZE`, even with
+  `random_page_cost=1.1`. `_batch_retrieve_direct` therefore expresses
+  equality as `BETWEEN i.query AND i.query`, which GiST cannot serve, so the
+  B-tree always wins. Measured: `alias_folded BETWEEN 'us' AND 'us'` runs in
+  ~1.4 ms against 12.3M rows.
+- The phrase and fuzzy branches order candidates by the pg_trgm KNN distance
+  (`ORDER BY field <-> query LIMIT 100`). A LIMIT on a computed expression
+  (`similarity(...)`, or popularity via heap fetches) still evaluates every
+  index-matched row — a common word matches hundreds of thousands — so the
+  GiST KNN walk, which stops at the limit, is the only bounded shape. GIN
+  indexes remain for the regex rechecks; GiST indexes (added to
+  `scripts/init_postgres.py`) provide the KNN ordering.
+- The description branch is gone from both phrase and fuzzy: long
+  description texts make the KNN walk I/O-bound enough to dominate cold
+  runs (the same conclusion the fuzzy-only analysis reached on 2026-09-14).
+- Fuzzy queries are capped at 40 characters (`_MAX_FUZZY_QUERY_LENGTH`).
+- A per-query circuit breaker (`_BREAKER_THRESHOLD = 2` consecutive timed-out
+  searches) skips a mention's phrase/fuzzy phases after two timeout cycles —
+  direct B-tree equality keeps running for it. Dense short-word
+  neighborhoods ("FT"-class tokens) cannot complete a KNN walk in any
+  timeout; without the breaker every batch containing them 503-looped
+  forever. The skip is logged and successful lookups reset the counter.
+- `statement_timeout_ms` default is 20000 (was 5000); chunk sizing scales
+  with it (`_ASSUMED_MS_PER_MENTION = 1000`), so one slow statement cancels
+  at most ~20 mentions. Cold-cache first touches on the KB are I/O-bound
+  enough that 5s cancelled healthy walks.
+
+End-to-end proof on the live pipeline: a real UK news article (the Lucy
+Letby / Thirlwall Inquiry coverage) round-trips at 34/44 entities linked
+with correct QIDs (Thirlwall Q24233729, Countess of Chester Hospital
+Q5177080, Liverpool Q24826, London Q84, Cheshire Q23064) after one
+cold-fail cycle; cluster geo coverage on the consuming side went from 1/69
+to a climbing majority as re-encoded articles carry QIDs again.
+
+Validation: 71 l2 unit tests + 8 opt-in PostgreSQL integration tests
+(throwaway `glinker_*_test` database) pass, including new coverage for
+typed per-mention failures through `L2Output.retrieval_failures`, the
+staged direct/phrase/fuzzy ordering, B-tree-routed equality, bounded
+branches against a noise-heavy corpus, and the breaker's skip-then-recover
+behavior.
